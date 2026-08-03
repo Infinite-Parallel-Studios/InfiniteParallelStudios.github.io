@@ -25,6 +25,53 @@ Everything up to the merge is yours: branch, commit, push the branch, open the P
 description that says what changed and how you verified it, and label the issue. The final
 click is not.
 
+## Board status model
+
+Every issue is a card on **IPS Master Board**, and the column is meant to answer one question:
+*what is the state of this ticket right now?*
+
+| Column | Means |
+|---|---|
+| **Todo** | New. Nobody has started it. |
+| **In Progress** | `@claude` is actively working this ticket. |
+| **Needs Context** | `@claude` could not finish — it needs Joshua to answer something to proceed. |
+| **Blocked** | Waiting on **another ticket or task** — a dependency, not a question. |
+| **Ready for Review** | Work is done, a PR is open, awaiting merge. |
+| **Done** | The PR was merged, **or** a non-code task (research, a question answered, a reply) is fully complete. |
+
+**Done does not require closing the issue.** It is set on the card. A research or respond-only
+task can be Done with its issue still open.
+
+## Ending a run: the BOARD_STATUS marker
+
+**Every `@claude` run must end its final comment with a marker on its own line**, so the board
+can record the outcome instead of leaving the card stuck in In Progress:
+
+```
+BOARD_STATUS: done
+BOARD_REASON: one line saying why
+```
+
+`BOARD_STATUS` must be exactly one of:
+
+| Value | Use it when | Card goes to |
+|---|---|---|
+| `ready-for-review` | you opened a PR | Ready for Review |
+| `done` | the work is complete and there is no open question — a non-code task finished, a question answered, a reply written | Done |
+| `needs-context` | you cannot proceed until **Joshua answers something**; say what you need in the same comment | Needs Context |
+| `blocked` | you are waiting on **another ticket or task**; name it | Blocked |
+
+Rules:
+
+- The marker goes on **its own line**. A mention inside a sentence is ignored on purpose.
+- `BOARD_REASON` is one line, and it is what a human reads first — write it for them.
+- If you opened a PR, the PR wins regardless of the marker: an open PR is a fact, the marker is
+  a self-report.
+- **No marker means the card stays In Progress**, and the run logs that it was missing. Nothing
+  guesses an outcome on your behalf — a stalled run is supposed to look stalled.
+- `needs-context` and `blocked` are different. A question for Joshua is `needs-context`. Waiting
+  on other work is `blocked`.
+
 ## Board signals
 
 Issues and pull requests in this repo are cards on the org GitHub Project **IPS Master
