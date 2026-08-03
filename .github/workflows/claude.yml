@@ -81,19 +81,23 @@ jobs:
       issue_node_id: ${{ github.event.issue.node_id }}
       issue_number: ${{ format('{0}', github.event.issue.number) }}
 
-  # If the run opened a PR, that PR's own pull_request event may never have
-  # reached board.yml, so its card is placed from here.
-  board-ready-for-review:
+  # Records the OUTCOME of the run: an open claude/issue-<n>-* PR means Ready
+  # for Review, otherwise the BOARD_STATUS marker CLAUDE.md requires the agent
+  # to end with (done / needs-context / blocked / ready-for-review). Neither
+  # present leaves the card In Progress and says so — a run that stalled should
+  # look stalled.
+  board-outcome:
     # After the agent, and after board-in-progress has settled, so the two never
     # write the same card at once. `always()` keeps it running even when
-    # board-in-progress was skipped; a failed agent run is not chased for a PR.
+    # board-in-progress was skipped; a failed agent run is not chased for an
+    # outcome, since it never reached the point of reporting one.
     needs: [claude, board-in-progress]
     if: always() && needs.claude.result == 'success'
     uses: Infinite-Parallel-Studios/infinite-forge/.github/workflows/board-reusable.yml@main
     secrets: inherit
     with:
       event_name: claude-finished
-      action: check-pr
+      action: outcome
       repo: ${{ github.repository }}
       issue_node_id: ${{ github.event.issue.node_id }}
       issue_number: ${{ format('{0}', github.event.issue.number) }}
