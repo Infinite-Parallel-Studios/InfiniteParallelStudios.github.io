@@ -1,4 +1,8 @@
+# MANAGED BY THE ORG BASELINE RECONCILER — infinite-forge/baseline/workflows/claude.yml
+# Edit it there; local edits are overwritten by the next reconciler PR.
+
 name: Claude Code
+
 on:
   issue_comment:
     types: [created]
@@ -8,6 +12,7 @@ on:
     types: [opened, assigned]
   pull_request_review:
     types: [submitted]
+
 jobs:
   claude:
     if: |
@@ -15,7 +20,15 @@ jobs:
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
-    runs-on: ubuntu-latest
+    # Follows the runner auto-switcher: the org variable RUNNER_LABELS is
+    # "ubuntu-latest" while Actions minutes last and ["self-hosted","homelab"]
+    # when they run low. This is the heavy job, so it is the one worth moving off
+    # paid minutes.
+    #
+    # The `|| '"ubuntu-latest"'` fallback matters: fromJSON is strict and an
+    # unset variable is an empty string, which would fail to parse and take the
+    # job down with it. Cloud is the safe default.
+    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '"ubuntu-latest"') }}
     permissions:
       contents: write
       pull-requests: write

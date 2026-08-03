@@ -1,0 +1,43 @@
+# MANAGED BY THE ORG BASELINE RECONCILER — infinite-forge/baseline/workflows/board.yml
+# Edit it there; local edits are overwritten by the next reconciler PR.
+#
+# The whole board lifecycle for this repo. It forwards events; all the logic
+# lives in infinite-forge/.github/workflows/board-reusable.yml so every repo
+# behaves identically.
+#
+# Supersedes the older add-only add-to-board.yml, which the reconciler deletes.
+
+name: Board
+
+on:
+  issues:
+    types: [opened, reopened, labeled, assigned]
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [opened, reopened, closed]
+
+jobs:
+  board:
+    # Secrets are not exposed to fork PRs, so skip rather than fail a run nobody
+    # can fix. True for issue and comment events, where this field is absent.
+    if: github.event.pull_request.head.repo.fork != true
+    uses: Infinite-Parallel-Studios/infinite-forge/.github/workflows/board-reusable.yml@main
+    secrets: inherit
+    with:
+      event_name: ${{ github.event_name }}
+      action: ${{ github.event.action }}
+      repo: ${{ github.repository }}
+      issue_node_id: ${{ github.event.issue.node_id }}
+      issue_number: ${{ format('{0}', github.event.issue.number) }}
+      pr_node_id: ${{ github.event.pull_request.node_id }}
+      pr_number: ${{ format('{0}', github.event.pull_request.number) }}
+      pr_head_ref: ${{ github.event.pull_request.head.ref }}
+      pr_merged: ${{ github.event.pull_request.merged || false }}
+      label_name: ${{ github.event.label.name }}
+      # An @claude comment on an ISSUE is the moment work starts. Comments on a
+      # PR are excluded: that is review chatter, not a pickup.
+      claude_pickup: >-
+        ${{ github.event_name == 'issue_comment'
+            && contains(github.event.comment.body, '@claude')
+            && !github.event.issue.pull_request }}
