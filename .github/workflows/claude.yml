@@ -1,5 +1,22 @@
 # MANAGED BY THE ORG BASELINE RECONCILER — infinite-forge/baseline/workflows/claude.yml
 # Edit it there; local edits are overwritten by the next reconciler PR.
+#
+# The board transitions live HERE rather than in board.yml on purpose. An
+# @claude run is the work-started signal, and nothing else in the system
+# reliably reports it:
+#
+#   * An issue opened with "@claude" in the BODY is not a comment, so the
+#     comment-based pickup rule never sees it.
+#   * @claude's own completion comment does not contain the string "@claude",
+#     so a contains() match on a comment cannot catch it either.
+#   * Events generated with the default GITHUB_TOKEN do not trigger workflows
+#     at all (GitHub's loop prevention), so a label or PR created by the agent
+#     may never reach board.yml.
+#
+# Driving the board from inside this workflow removes every one of those
+# dependencies: the run itself is the trigger. Both board jobs call the same
+# shared lifecycle workflow as board.yml, so there is still exactly one
+# implementation of "move a card".
 
 name: Claude Code
 
@@ -41,3 +58,42 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+  # Runs alongside the agent, not after it, so the card reflects reality while
+  # the work is actually happening rather than once it is over.
+  board-in-progress:
+    # Deliberately no `needs: claude` — it starts at the same moment the agent
+    # does, so the card is In Progress while the work is happening rather than
+    # once it is over. The condition mirrors the claude job's, narrowed to
+    # issues (a comment on a PR is review chatter, not a pickup).
+    if: |
+      (github.event_name == 'issues' &&
+        (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))) ||
+      (github.event_name == 'issue_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        !github.event.issue.pull_request)
+    uses: Infinite-Parallel-Studios/infinite-forge/.github/workflows/board-reusable.yml@main
+    secrets: inherit
+    with:
+      event_name: claude-pickup
+      action: start
+      repo: ${{ github.repository }}
+      issue_node_id: ${{ github.event.issue.node_id }}
+      issue_number: ${{ format('{0}', github.event.issue.number) }}
+
+  # If the run opened a PR, that PR's own pull_request event may never have
+  # reached board.yml, so its card is placed from here.
+  board-ready-for-review:
+    # After the agent, and after board-in-progress has settled, so the two never
+    # write the same card at once. `always()` keeps it running even when
+    # board-in-progress was skipped; a failed agent run is not chased for a PR.
+    needs: [claude, board-in-progress]
+    if: always() && needs.claude.result == 'success'
+    uses: Infinite-Parallel-Studios/infinite-forge/.github/workflows/board-reusable.yml@main
+    secrets: inherit
+    with:
+      event_name: claude-finished
+      action: check-pr
+      repo: ${{ github.repository }}
+      issue_node_id: ${{ github.event.issue.node_id }}
+      issue_number: ${{ format('{0}', github.event.issue.number) }}
