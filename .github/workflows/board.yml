@@ -23,10 +23,12 @@ on:
     types: [opened, reopened, closed]
 
 permissions:
-  # The dependency gate adds and removes the "blocked" label. PROJECTS_TOKEN is
-  # Issues: READ only, on purpose, so the board can never close an issue — label
-  # writes fall to BASELINE_TOKEN, or to this token where that secret is absent.
+  # Declaring ANY permission replaces the default set rather than adding to it,
+  # so contents and pull-requests are listed explicitly. Omitting them narrowed
+  # GITHUB_TOKEN to issues+metadata, which is not what this needs.
+  contents: read
   issues: write
+  pull-requests: read
 
 jobs:
   board:
@@ -46,6 +48,9 @@ jobs:
       pr_head_ref: ${{ github.event.pull_request.head.ref }}
       pr_merged: ${{ github.event.pull_request.merged || false }}
       label_name: ${{ github.event.label.name }}
+      # From the payload: the dependency check then needs no API call to read the
+      # body of the very issue that triggered it.
+      issue_body: ${{ github.event.issue.body }}
       # An @claude comment on an ISSUE is the moment work starts. Comments on a
       # PR are excluded: that is review chatter, not a pickup.
       claude_pickup: >-
