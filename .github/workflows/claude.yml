@@ -31,12 +31,97 @@ on:
     types: [submitted]
 
 jobs:
-  claude:
+  # THE DEPENDENCY GATE.
+  #
+  # An issue whose body says "Blocked by #N" is not workable until every N it
+  # names is closed. The board shows that as the Blocked column; this is the half
+  # that makes it mean something, by refusing to start the agent at all.
+  #
+  # It runs before `claude` rather than inside it because the point is that the
+  # run does not happen: a gate the agent evaluates for itself is a gate the
+  # agent can talk itself past, and a half-run that stops early still comments,
+  # still moves the card, and still burns minutes.
+  #
+  # Fails OPEN, deliberately. If the library cannot be fetched or the API cannot
+  # be read, work proceeds — an unavailable dependency service must not become an
+  # outage that stops every agent in the org. The failure it guards against is a
+  # ticket built too early, which is recoverable; the failure it must not cause
+  # is nothing being buildable at all. Both outcomes are logged.
+  dependency-gate:
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') && !github.event.issue.pull_request) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+    runs-on: ubuntu-latest
+    outputs:
+      blocked: ${{ steps.gate.outputs.blocked }}
+      blockers: ${{ steps.gate.outputs.blockers }}
+    steps:
+      - name: Check for unresolved blockers
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.BASELINE_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          FORGE: Infinite-Parallel-Studios/infinite-forge
+        run: |
+          set -euo pipefail
+
+          echo "blocked=false" >> "$GITHUB_OUTPUT"
+
+          LIB="$RUNNER_TEMP/blocked-deps.lib.sh"
+          if ! gh api "/repos/${FORGE}/contents/.github/scripts/blocked-deps.lib.sh?ref=main" \
+                 --jq '.content' 2>/dev/null | base64 -d > "$LIB" || [ ! -s "$LIB" ]; then
+            echo "::warning::Could not fetch the dependency library; proceeding without the gate."
+            exit 0
+          fi
+          # shellcheck source=/dev/null
+          source "$LIB"
+
+          BODY=$(gh api "/repos/${REPO}/issues/${ISSUE_NUMBER}" --jq '.body // ""' 2>/dev/null || echo "")
+          REMAIN=$(unresolved_blockers "$BODY" "$ISSUE_NUMBER")
+
+          if [ -z "$REMAIN" ]; then
+            echo "No unresolved blockers on #${ISSUE_NUMBER}; the run may proceed."
+            exit 0
+          fi
+
+          {
+            echo "blocked=true"
+            echo "blockers=${REMAIN}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::warning::#${ISSUE_NUMBER} is blocked by: ${REMAIN}. Not starting the agent."
+
+          LIST=$(for B in $REMAIN; do printf '#%s ' "$B"; done)
+
+          # Written to a file rather than inlined as a heredoc: a multi-line
+          # markdown body inside a run: block scalar has broken this workflow
+          # before, because an unindented line ends the scalar.
+          NOTE="$RUNNER_TEMP/blocked-note.md"
+          {
+            printf '%s\n\n' "**Not started — this issue is blocked.**"
+            printf 'Still waiting on: %s\n\n' "$LIST"
+            printf '%s\n' "This ticket declares \`Blocked by\` in its body, and at least one of those issues is"
+            printf '%s\n' "still open. It is released automatically when the last one closes, and the card"
+            printf '%s\n' "returns to Todo — summon \`@claude\` again then, or remove the \`blocked\` label to"
+            printf '%s\n' "override."
+          } > "$NOTE"
+          gh api "/repos/${REPO}/issues/${ISSUE_NUMBER}/comments" -F body=@"$NOTE" >/dev/null 2>&1 || true
+
+          {
+            printf '### Dependency gate\n\n'
+            printf '`#%s` not started — blocked by: %s\n' "$ISSUE_NUMBER" "$LIST"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  claude:
+    # always(): the gate is skipped entirely for PR-review events, and a skipped
+    # need would otherwise skip this job with it.
+    needs: dependency-gate
+    if: |
+      always() && needs.dependency-gate.outputs.blocked != 'true' &&
+      ((github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))))
     # Follows the runner auto-switcher: the org variable RUNNER_LABELS is
     # "ubuntu-latest" while Actions minutes last and ["self-hosted","homelab"]
     # when they run low. This is the heavy job, so it is the one worth moving off
@@ -188,12 +273,18 @@ jobs:
     # does, so the card is In Progress while the work is happening rather than
     # once it is over. The condition mirrors the claude job's, narrowed to
     # issues (a comment on a PR is review chatter, not a pickup).
+    #
+    # It does need the gate, though: a blocked run never starts, and marking a
+    # card In Progress for work that is not happening is the exact lie the board
+    # exists to prevent. The card stays in Blocked.
+    needs: dependency-gate
     if: |
-      (github.event_name == 'issues' &&
+      always() && needs.dependency-gate.outputs.blocked != 'true' &&
+      ((github.event_name == 'issues' &&
         (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))) ||
       (github.event_name == 'issue_comment' &&
         contains(github.event.comment.body, '@claude') &&
-        !github.event.issue.pull_request)
+        !github.event.issue.pull_request))
     uses: Infinite-Parallel-Studios/infinite-forge/.github/workflows/board-reusable.yml@main
     secrets: inherit
     with:

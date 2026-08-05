@@ -11,11 +11,22 @@ name: Board
 
 on:
   issues:
-    types: [opened, reopened, labeled, assigned]
+    # edited / closed / unlabeled are here for task dependencies:
+    #   edited     a "Blocked by #N" line added or removed after filing
+    #   closed     the release trigger — a merged PR saying "Closes #N" closes N,
+    #              which fires this, so one event covers both halves of it
+    #   unlabeled  someone lifting the gate by hand
+    types: [opened, reopened, edited, closed, labeled, unlabeled, assigned]
   issue_comment:
     types: [created]
   pull_request:
     types: [opened, reopened, closed]
+
+permissions:
+  # The dependency gate adds and removes the "blocked" label. PROJECTS_TOKEN is
+  # Issues: READ only, on purpose, so the board can never close an issue — label
+  # writes fall to BASELINE_TOKEN, or to this token where that secret is absent.
+  issues: write
 
 jobs:
   board:
