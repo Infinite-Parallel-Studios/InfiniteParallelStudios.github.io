@@ -116,6 +116,50 @@ Rules:
 - `needs-context` and `blocked` are different. A question for Joshua is `needs-context`. Waiting
   on other work is `blocked`.
 
+## Task dependencies: `Blocked by #N`
+
+Some tickets cannot be started until another one is finished. Say so in the issue **body**, on
+its own line:
+
+```
+Blocked by #42
+```
+
+More than one is fine — separate lines, or one line:
+
+```
+Blocked by #42
+Blocked by #43, #44 and #45
+```
+
+That is the whole vocabulary. It is read by the pipeline, not just by people:
+
+- While **any** named issue is still open, the ticket carries the `blocked` label and its card
+  sits in **Blocked**.
+- **`@claude` will not start it.** The dispatcher checks before the agent runs and refuses,
+  with a comment saying which issues it is waiting on. This is not advisory — the run does not
+  happen.
+- When the **last** blocker closes, the label comes off by itself and the card returns to
+  **Todo**. Closing one of three changes nothing; every blocker is re-checked each time.
+
+Rules worth knowing before you write one:
+
+- **Same repo only.** `Blocked by owner/repo#12` is not supported; it is ignored and the run
+  warns rather than quietly reading it as `#12` in this repo.
+- **Only the blockers you name.** There is no transitive walk: if A is blocked by B and B is
+  blocked by C, closing B releases A even though C is open. Name C too if you mean it.
+- **A cycle is a real deadlock.** A blocked by B and B blocked by A leaves both stuck, visibly,
+  until a human removes a line. Nothing spins.
+- **Examples in fenced code blocks do not count**, which is why the ones above are safe to copy.
+- **`Blocked by #N` in a comment does nothing.** It has to be in the issue body, because the
+  body is the thing that gets re-read.
+
+To override, remove the `blocked` label — that releases the card immediately.
+
+**Filing a ticket that depends on another? Write the line.** Nothing infers it, and a
+dependency you only mentioned in prose will not stop the agent from building the thing too
+early.
+
 ## Board signals
 
 Issues and pull requests in this repo are cards on the org GitHub Project **IPS Master
