@@ -62,6 +62,10 @@ jobs:
           GH_TOKEN: ${{ secrets.BASELINE_TOKEN || secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
+          # The body, straight from the event payload. The API read this replaces
+          # is the one that failed on infinite-cortex#37: it returned nothing, the
+          # parser saw no "Blocked by" line, and a blocked ticket was built.
+          ISSUE_BODY: ${{ github.event.issue.body }}
           FORGE: Infinite-Parallel-Studios/infinite-forge
         run: |
           set -euo pipefail
@@ -77,7 +81,29 @@ jobs:
           # shellcheck source=/dev/null
           source "$LIB"
 
-          BODY=$(gh api "/repos/${REPO}/issues/${ISSUE_NUMBER}" --jq '.body // ""' 2>/dev/null || echo "")
+          # Payload first. Only if it is absent do we ask the API, and a FAILED
+          # read is not the same as an empty body: it means we do not know what
+          # this ticket depends on, and starting the agent on that basis is the
+          # bug this gate exists to prevent. Unknown -> refuse.
+          if [ -n "${ISSUE_BODY:-}" ]; then
+            BODY="$ISSUE_BODY"
+            echo "Body from the event payload: ${#BODY} bytes."
+          elif BODY=$(gh api "/repos/${REPO}/issues/${ISSUE_NUMBER}" --jq '.body // ""' 2>/dev/null); then
+            echo "Body from the API: ${#BODY} bytes."
+          else
+            echo "::error::Could not read the body of #${ISSUE_NUMBER}. Refusing to start:"
+            echo "::error::an unreadable ticket is not evidence that it has no blockers."
+            {
+              echo "blocked=true"
+              echo "blockers=unknown"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          NAMED=$(parse_blockers "$BODY" "$ISSUE_NUMBER" | tr '\n' ' ')
+          echo "Blockers named: [${NAMED% }]"
+          for B in $NAMED; do echo "  #$B is $(issue_state "$B")"; done
+
           REMAIN=$(unresolved_blockers "$BODY" "$ISSUE_NUMBER")
 
           if [ -z "$REMAIN" ]; then
