@@ -55,9 +55,131 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      # Turns the specialist:<name> label into loaded expertise for this run.
+      #
+      # Cortex already applies that label when it files an issue, so this needs
+      # no new metadata channel -- before this step existed the label was simply
+      # decoration, and every run was the same generalist.
+      #
+      # The profile is fetched from infinite-forge rather than read from disk:
+      # this workflow runs in every repo, and capabilities/ only exists in one.
+      # Pinned to @main, the same way board-reusable.yml is referenced.
+      - name: Resolve the specialist profile
+        id: specialist
+        env:
+          GH_TOKEN: ${{ secrets.BASELINE_TOKEN || secrets.GITHUB_TOKEN }}
+          REGISTRY_REPO: Infinite-Parallel-Studios/infinite-forge
+          LABELS: ${{ toJSON(github.event.issue.labels.*.name) }}
+        run: |
+          set -euo pipefail
+
+          NAME=$(printf '%s' "$LABELS" | jq -r '.[]? | select(startswith("specialist:")) | sub("^specialist:"; "")' | head -1)
+
+          if [ -z "$NAME" ]; then
+            echo "No specialist: label on this issue; running as the generalist."
+            echo "matched=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Requested specialist: $NAME"
+
+          fetch() { gh api "/repos/${REGISTRY_REPO}/contents/$1?ref=main" --jq '.content' 2>/dev/null | base64 -d; }
+
+          if ! ROSTER=$(fetch capabilities/registry.yaml); then
+            echo "::warning::Could not read the registry; running as the generalist."
+            echo "matched=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Roster keys are two-space-indented under `agents:`. Matching on the
+          # roster rather than on the file's existence is deliberate: a profile
+          # that is not rostered is inert, which is what makes the merge the
+          # activation.
+          if ! printf '%s' "$ROSTER" | grep -qE "^  ${NAME}:\s*$"; then
+            echo "::warning::'${NAME}' is not in the roster."
+            echo "matched=" >> "$GITHUB_OUTPUT"
+            echo "gap=${NAME}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          PROFILE=$(fetch "capabilities/agents/${NAME}.md")
+
+          # Strip the YAML frontmatter -- it is registry metadata, not
+          # instruction, and feeding it to the model is noise.
+          BODY=$(printf '%s\n' "$PROFILE" | awk 'BEGIN{n=0} /^---[[:space:]]*$/{n++; next} n>=2{print}')
+
+          # Compose the shared fragments the profile lists, then the profile.
+          SHARED=$(printf '%s\n' "$PROFILE" | awk -F'[][]' '/^shared:/{print $2}' | tr -d ' ' | tr ',' '\n')
+          OUT="$RUNNER_TEMP/specialist.md"
+          {
+            echo "<!-- specialist profile: ${NAME} (capabilities/agents/${NAME}.md) -->"
+            echo
+            for FRAGMENT in $SHARED; do
+              [ -n "$FRAGMENT" ] || continue
+              fetch "capabilities/agents/_shared/${FRAGMENT}.md" || echo "<!-- missing fragment: ${FRAGMENT} -->"
+              echo
+            done
+            printf '%s\n' "$BODY"
+          } > "$OUT"
+
+          # Injected by appending to CLAUDE.md in the checkout, which Claude
+          # Code reads as project instructions.
+          #
+          # Not the `prompt` input: that is documented as "a direct prompt or
+          # custom template for automation workflows", and using it on an
+          # issue-triggered run replaces the context template that carries the
+          # ticket body. The documented successor to v0.x's custom_instructions
+          # is `claude_args: --append-system-prompt`, which appends rather than
+          # replaces -- but the profile is multi-line markdown, and threading
+          # that through shell-tokenised args intact is fragile in a way that
+          # fails silently. A file the tool already reads has neither problem.
+          #
+          # .git/info/exclude keeps it untrackable, so an agent running `git add
+          # -A` cannot commit the injected copy.
+          echo "CLAUDE.md" >> .git/info/exclude
+          {
+            echo
+            echo "<!-- ips-specialist:start -->"
+            echo "# Active specialist: ${NAME}"
+            echo
+            echo "You are running as this specialist. The following is your profile."
+            echo
+            cat "$OUT"
+            echo "<!-- ips-specialist:end -->"
+          } >> CLAUDE.md
+
+          echo "matched=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "Activated ${NAME} ($(wc -l < "$OUT") lines) via CLAUDE.md."
+
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+      # A specialist that was asked for and does not exist is a gap in the
+      # roster, not a reason to fail. The run already proceeded as the
+      # generalist; this records the request so it becomes a candidate for the
+      # registrar. The registry grows from demonstrated demand.
+      - name: Flag an unknown specialist
+        if: always() && steps.specialist.outputs.gap != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          GAP: ${{ steps.specialist.outputs.gap }}
+        run: |
+          set -euo pipefail
+          gh api -X POST "/repos/${REPO}/issues/${ISSUE}/labels" \
+            -f 'labels[]=capability-gap' >/dev/null || true
+
+          ROSTER_URL="https://github.com/Infinite-Parallel-Studios/infinite-forge/blob/main/capabilities/registry.yaml"
+          BODY_FILE="$RUNNER_TEMP/gap.md"
+          {
+            printf 'This task asked for the `%s` specialist, which is not in the capability roster, so it ran as the generalist rather than being blocked.\n\n' "$GAP"
+            printf '`%s` is now a candidate for the registrar. To create it, open an issue tagged `specialist:registrar` asking for it — the roster is at [capabilities/registry.yaml](%s).\n' "$GAP" "$ROSTER_URL"
+          } > "$BODY_FILE"
+
+          gh api -X POST "/repos/${REPO}/issues/${ISSUE}/comments" \
+            -F body=@"$BODY_FILE" >/dev/null || true
 
   # Runs alongside the agent, not after it, so the card reflects reality while
   # the work is actually happening rather than once it is over.
@@ -81,17 +203,171 @@ jobs:
       issue_node_id: ${{ github.event.issue.node_id }}
       issue_number: ${{ format('{0}', github.event.issue.number) }}
 
+  # The last mile of the loop, made deterministic.
+  #
+  # An agent that pushes claude/issue-<n>-* and then reports ready-for-review
+  # without opening a PR leaves the work stranded: a branch nobody is looking at
+  # and a card claiming it waits on a review that does not exist. That is not
+  # hypothetical — it is what infinite-cortex#16 did, ticking "Open PR" in its
+  # own checklist having only pushed the branch.
+  #
+  # So the pipeline opens the PR rather than asking the model to remember to.
+  # Opening one is mechanical: there is a branch, it has commits, it belongs to
+  # an issue. Judgement is not involved, so neither is the model.
+  #
+  # The merge gate is untouched. This job opens and verifies; it never merges,
+  # never enables auto-merge, and never pushes to a default branch.
+  open-pr:
+    needs: claude
+    # Mirrors the claude job, narrowed to issue-driven runs: a review comment on
+    # a PR is feedback on work that already has one.
+    if: |
+      always() && needs.claude.result == 'success' &&
+      ((github.event_name == 'issues' &&
+        (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))) ||
+       (github.event_name == 'issue_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        !github.event.issue.pull_request))
+    # Seconds of API calls, and it must work when the homelab box is down.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Open a PR for the branch the agent pushed
+        env:
+          # BASELINE_TOKEN first, and not for convenience.
+          #
+          # GITHUB_TOKEN cannot open a PR unless "Allow GitHub Actions to create
+          # and approve pull requests" is enabled, which is off by default and is
+          # a PER-REPOSITORY setting. Depending on it would mean every new repo
+          # silently loses its last mile until someone remembers a checkbox — and
+          # the whole point of the baseline is that a new repo needs no manual
+          # setup. It also bundles "create" with "approve" in one toggle, and
+          # nothing here should be able to approve anything.
+          #
+          # BASELINE_TOKEN is the org secret the reconciler already uses (all
+          # repositories, Pull requests: read and write), so this works in a repo
+          # created tomorrow with no configuration. A PR it opens also emits a
+          # real pull_request event, which GITHUB_TOKEN-authored ones do not, so
+          # board.yml sees it the same as any human PR.
+          #
+          # The fallback keeps this working in a repo the org secret does not
+          # reach; if that path is also blocked, the error below says exactly
+          # which switch to flip.
+          GH_TOKEN: ${{ secrets.BASELINE_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          OWNER="${REPO%%/*}"
+          PREFIX="claude/issue-${ISSUE_NUMBER}-"
+
+          # --paginate because the agent's branch is not guaranteed to be on the
+          # first page of a repo that has been running a while. Branch names end
+          # in a UTC timestamp, so a reverse sort puts the newest run first —
+          # which is the one this job just finished.
+          BRANCH=$(gh api --paginate "/repos/${REPO}/branches?per_page=100" --jq '.[].name' \
+            | awk -v pfx="$PREFIX" 'index($0, pfx) == 1' \
+            | sort -r | head -1)
+
+          if [ -z "$BRANCH" ]; then
+            # Legitimate: research, a question answered, a review left. Those
+            # runs have no code and must not be forced into a PR.
+            echo "No ${PREFIX}* branch in $REPO — this run produced no code to review."
+            echo "- issue #${ISSUE_NUMBER} — no branch pushed, no PR to open" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Branch: $BRANCH"
+
+          # state=all on purpose. A PR that Joshua closed unmerged is a decision;
+          # reopening it on the next run would overrule him.
+          EXISTING=$(gh api "/repos/${REPO}/pulls?state=all&head=${OWNER}:${BRANCH}&per_page=100" \
+            --jq '.[] | "\(.number)\t\(.state)\t\(.html_url)"' | head -1)
+
+          if [ -n "$EXISTING" ]; then
+            EX_NUMBER=$(printf '%s' "$EXISTING" | cut -f1)
+            EX_STATE=$(printf '%s' "$EXISTING" | cut -f2)
+            EX_URL=$(printf '%s' "$EXISTING" | cut -f3)
+            echo "PR #${EX_NUMBER} already exists for $BRANCH (state: ${EX_STATE})."
+            if [ "$EX_STATE" = "open" ]; then
+              echo "- issue #${ISSUE_NUMBER} — [PR #${EX_NUMBER}](${EX_URL}) already open" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::notice::PR #${EX_NUMBER} for $BRANCH is ${EX_STATE}. Not reopening — a closed PR is a decision, not a gap."
+              echo "- issue #${ISSUE_NUMBER} — PR #${EX_NUMBER} is ${EX_STATE}, left alone" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+
+          BASE=$(gh api "/repos/${REPO}" --jq '.default_branch')
+
+          # A branch pushed with nothing on it would open an empty PR, which is
+          # worse than no PR: it reads as work delivered.
+          AHEAD=$(gh api "/repos/${REPO}/compare/${BASE}...${BRANCH}" --jq '.ahead_by')
+          echo "$BRANCH is ${AHEAD} commit(s) ahead of ${BASE}."
+          if [ "${AHEAD:-0}" -eq 0 ]; then
+            echo "::warning::$BRANCH has no commits beyond ${BASE}; there is nothing to review. Not opening a PR."
+            echo "- issue #${ISSUE_NUMBER} — \`$BRANCH\` is empty, no PR opened" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # The agent's own commit subject describes the change better than the
+          # issue title does; the issue title is the fallback when the subject is
+          # unreadable for any reason.
+          SUBJECT=$(gh api "/repos/${REPO}/commits/${BRANCH}" --jq '.commit.message' 2>/dev/null | head -1 || true)
+          TITLE="${SUBJECT:-${ISSUE_TITLE}}"
+
+          # "Closes #n" is what links the PR to the issue AND what moves both
+          # cards when board.yml sees the pull_request event.
+          BODY=$(printf '%s\n' \
+            "Closes #${ISSUE_NUMBER}" \
+            "" \
+            "Opened by the Forge pipeline from \`${BRANCH}\`, which the agent pushed during [its run](${RUN_URL})." \
+            "" \
+            "The pipeline opens PRs so that \"work is ready\" is a fact about the repository rather than something a run reports about itself. Review and merge as normal — nothing here merges anything.")
+
+          if ! PR_JSON=$(gh api -X POST "/repos/${REPO}/pulls" \
+              -f title="$TITLE" -f head="$BRANCH" -f base="$BASE" -f body="$BODY" 2>"$RUNNER_TEMP/pr.err"); then
+            echo "::error::Could not open a PR for $BRANCH:"
+            sed 's/^/  /' "$RUNNER_TEMP/pr.err"
+            echo "::error::If this says 'GitHub Actions is not permitted to create or approve pull requests',"
+            echo "::error::the fallback to GITHUB_TOKEN was taken and that path is blocked. The fix is to make"
+            echo "::error::the org secret BASELINE_TOKEN visible to ${REPO} — not to enable that setting, which"
+            echo "::error::also lets Actions approve pull requests."
+            echo "::error::The branch is pushed and safe; nothing is lost by re-running this job."
+            exit 1
+          fi
+
+          PR_NUMBER=$(echo "$PR_JSON" | jq -r '.number')
+          PR_URL=$(echo "$PR_JSON" | jq -r '.html_url')
+
+          # Read it back rather than trusting the create response. This job
+          # exists because a self-report was believed once already.
+          PR_STATE=$(gh api "/repos/${REPO}/pulls/${PR_NUMBER}" --jq '.state')
+          if [ "$PR_STATE" != "open" ]; then
+            echo "::error::PR #${PR_NUMBER} was created but reads back as '${PR_STATE}'."
+            exit 1
+          fi
+
+          echo "Opened and verified: #${PR_NUMBER} — ${PR_URL}"
+          echo "- issue #${ISSUE_NUMBER} — opened [PR #${PR_NUMBER}](${PR_URL}) from \`${BRANCH}\`" >> "$GITHUB_STEP_SUMMARY"
+
   # Records the OUTCOME of the run: an open claude/issue-<n>-* PR means Ready
   # for Review, otherwise the BOARD_STATUS marker CLAUDE.md requires the agent
   # to end with (done / needs-context / blocked / ready-for-review). Neither
   # present leaves the card In Progress and says so — a run that stalled should
   # look stalled.
   board-outcome:
-    # After the agent, and after board-in-progress has settled, so the two never
-    # write the same card at once. `always()` keeps it running even when
-    # board-in-progress was skipped; a failed agent run is not chased for an
+    # After the agent, after board-in-progress has settled so the two never write
+    # the same card at once, and after open-pr so the PR it opens is visible to
+    # the lookup below. Without that last one this job races the PR it is meant
+    # to find and falls back to the marker. `always()` keeps it running when
+    # either of those was skipped; a failed agent run is not chased for an
     # outcome, since it never reached the point of reporting one.
-    needs: [claude, board-in-progress]
+    needs: [claude, board-in-progress, open-pr]
     if: always() && needs.claude.result == 'success'
     uses: Infinite-Parallel-Studios/infinite-forge/.github/workflows/board-reusable.yml@main
     secrets: inherit
