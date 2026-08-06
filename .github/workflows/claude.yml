@@ -52,6 +52,10 @@ jobs:
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') && !github.event.issue.pull_request) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
+    permissions:
+      # read the blockers' states, and comment on a refused ticket
+      issues: write
+      contents: read
     outputs:
       blocked: ${{ steps.gate.outputs.blocked }}
       blockers: ${{ steps.gate.outputs.blockers }}
@@ -59,7 +63,14 @@ jobs:
       - name: Check for unresolved blockers
         id: gate
         env:
+          # Cross-repo CONTENTS read, to fetch the library from infinite-forge.
           GH_TOKEN: ${{ secrets.BASELINE_TOKEN || secrets.GITHUB_TOKEN }}
+          # Same-repo ISSUE reads. BASELINE_TOKEN has no Issues permission, so
+          # routing blocker lookups through it returned "unknown" for every one
+          # of them -- the gate then blocked on the fail-closed path rather than
+          # on a real answer, and would have kept blocking after the blocker
+          # closed. github.token is scoped to this repo and can read issues.
+          IPS_ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           # The body, straight from the event payload. The API read this replaces
@@ -80,6 +91,14 @@ jobs:
           fi
           # shellcheck source=/dev/null
           source "$LIB"
+
+          PREFLIGHT=$(issue_read_preflight)
+          if [ "$PREFLIGHT" = "ok" ]; then
+            echo "Issue token: can read issues in $REPO."
+          else
+            echo "::error::Issue token ${PREFLIGHT}"
+            echo "::error::Every blocker will read as 'unknown' and this ticket will stay blocked."
+          fi
 
           # Payload first. Only if it is absent do we ask the API, and a FAILED
           # read is not the same as an empty body: it means we do not know what
