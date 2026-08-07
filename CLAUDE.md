@@ -139,8 +139,14 @@ That is the whole vocabulary. It is read by the pipeline, not just by people:
 - **`@claude` will not start it.** The dispatcher checks before the agent runs and refuses,
   with a comment saying which issues it is waiting on. This is not advisory — the run does not
   happen.
-- When the **last** blocker closes, the label comes off by itself and the card returns to
-  **Todo**. Closing one of three changes nothing; every blocker is re-checked each time.
+- When the **last** blocker closes, the label comes off by itself and **`@claude` is summoned
+  automatically** — the ticket starts building with nobody typing anything, and its card goes
+  straight to **In Progress**. Closing one of three changes nothing; every blocker is
+  re-checked each time.
+
+The auto-summon happens **once per ticket, ever**, and only for a ticket that was genuinely
+sitting in Blocked. If you would rather it not start on its own, take the `blocked` label off
+by hand before the last blocker closes — that releases the card to Todo and leaves it there.
 
 Rules worth knowing before you write one:
 
