@@ -213,7 +213,9 @@ jobs:
   review:
     needs: verify
     if: always() && github.event.action == 'opened' && github.event.pull_request.head.repo.fork != true
-    runs-on: ubuntu-latest
+    # `verify` above already runs on the box and this job `needs` it, so this
+    # adds no contention: it runs in the slot verify has just released.
+    runs-on: [self-hosted, homelab]
     permissions:
       contents: read
       pull-requests: write

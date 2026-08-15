@@ -416,8 +416,10 @@ jobs:
        (github.event_name == 'issue_comment' &&
         contains(github.event.comment.body, '@claude') &&
         !github.event.issue.pull_request))
-    # Seconds of API calls, and it must work when the homelab box is down.
-    runs-on: ubuntu-latest
+    # Seconds of API calls. On the homelab box because on exhausted minutes it
+    # cannot open a PR at all -- which is exactly how agent branches ended up
+    # pushed with no PR and no card. Tradeoff: box down, branches wait for it.
+    runs-on: [self-hosted, homelab]
     permissions:
       contents: read
       pull-requests: write
