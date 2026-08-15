@@ -166,6 +166,25 @@ To override, remove the `blocked` label — that releases the card immediately.
 dependency you only mentioned in prose will not stop the agent from building the thing too
 early.
 
+## Tickets the agent must not build: `human-task`
+
+Some tickets need a person: installing something on the homelab box, running an EAS build,
+plugging in a phone, clicking through a console. Label those **`human-task`**.
+
+The label is enforced, not advisory:
+
+- **`@claude` will not start**, even if summoned by name. The gate refuses first, before it
+  reads anything else, and comments saying why.
+- **Auto-dispatch will never pick it up.** Every other refusal in that guard means "not ready
+  yet"; this one means "never", so it outranks all of them.
+
+Because it is enforced, a human task can safely carry `Blocked by #N` like anything else — the
+dependency shows on the board and the ticket still will not be built. Before the label existed
+the only defence was leaving `@claude` out of the body, which failed the first time someone
+wrote a sentence *about* not summoning the agent.
+
+Removing the label is how you overrule it.
+
 ## Board signals
 
 Issues and pull requests in this repo are cards on the org GitHub Project **IPS Master

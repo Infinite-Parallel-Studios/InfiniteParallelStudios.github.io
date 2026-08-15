@@ -51,7 +51,11 @@ jobs:
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') && !github.event.issue.pull_request) ||
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
-    runs-on: ubuntu-latest
+    # On the homelab box: this gate must be live even when Actions minutes are
+    # exhausted, because a gate that cannot run is a gate that is not enforcing
+    # anything. Paired with the `result` check on the `claude` job below -- moving
+    # it here without that check would make the fail-open path reachable.
+    runs-on: [self-hosted, homelab]
     permissions:
       # read the blockers' states, and comment on a refused ticket
       issues: write
@@ -77,11 +81,41 @@ jobs:
           # is the one that failed on infinite-cortex#37: it returned nothing, the
           # parser saw no "Blocked by" line, and a blocked ticket was built.
           ISSUE_BODY: ${{ github.event.issue.body }}
+          # Straight from the payload rather than an API call, so this check
+          # still holds when the library fetch or the token fails -- the two
+          # things that make the rest of this gate fail OPEN. "Never for the
+          # agent" must not be one of the things a network blip can undo.
+          IS_HUMAN_TASK: ${{ contains(github.event.issue.labels.*.name, 'human-task') }}
           FORGE: Infinite-Parallel-Studios/infinite-forge
         run: |
           set -euo pipefail
 
           echo "blocked=false" >> "$GITHUB_OUTPUT"
+
+          # A human task is refused unconditionally, and first: no library, no
+          # token, no API call, nothing that can fail open. The agent cannot
+          # install software on a server or run a device build, and a run that
+          # starts on one spends real minutes discovering that.
+          #
+          # This is deliberately not a dependency: a blocked ticket becomes
+          # workable when its blockers close, and this kind never does.
+          if [ "${IS_HUMAN_TASK:-false}" = "true" ]; then
+            echo "#${ISSUE_NUMBER} is labelled human-task — refusing to start the agent."
+            echo "blocked=true" >> "$GITHUB_OUTPUT"
+            echo "blockers=human-task" >> "$GITHUB_OUTPUT"
+
+            NOTE="$RUNNER_TEMP/human-task-note.md"
+            {
+              printf 'This ticket is labelled `human-task`, so I have not started work on it.\n\n'
+              printf 'It needs someone with access the pipeline does not have — a shell on the\n'
+              printf 'server, a device build, physical hardware. Remove the label if that is\n'
+              printf 'wrong and summon me again.\n'
+            } > "$NOTE"
+            gh api -X POST "/repos/${REPO}/issues/${ISSUE_NUMBER}/comments" \
+              -F body=@"$NOTE" >/dev/null 2>&1 \
+              || echo "::warning::Could not comment on #${ISSUE_NUMBER}."
+            exit 0
+          fi
 
           LIB="$RUNNER_TEMP/blocked-deps.lib.sh"
           if ! gh api "/repos/${FORGE}/contents/.github/scripts/blocked-deps.lib.sh?ref=main" \
@@ -159,10 +193,17 @@ jobs:
 
   claude:
     # always(): the gate is skipped entirely for PR-review events, and a skipped
-    # need would otherwise skip this job with it.
+    # need would otherwise skip this job with it. But `always()` alone also lets a
+    # FAILED or CANCELLED gate through: those leave `blocked` empty, and empty is
+    # not 'true'. That was unreachable while the gate ran on cloud runners; it is
+    # reachable now that it runs on the homelab box, which can be busy or down.
+    # So: 'skipped' still proceeds (PR-review events), 'failure'/'cancelled' do
+    # not. Both refusals -- `Blocked by #N` and `human-task` -- live in that job.
     needs: dependency-gate
     if: |
-      always() && needs.dependency-gate.outputs.blocked != 'true' &&
+      always() &&
+      (needs.dependency-gate.result == 'success' || needs.dependency-gate.result == 'skipped') &&
+      needs.dependency-gate.outputs.blocked != 'true' &&
       ((github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
