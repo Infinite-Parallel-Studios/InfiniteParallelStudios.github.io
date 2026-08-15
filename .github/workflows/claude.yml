@@ -111,6 +111,11 @@ jobs:
               printf 'server, a device build, physical hardware. Remove the label if that is\n'
               printf 'wrong and summon me again.\n'
             } > "$NOTE"
+            # GH_TOKEN here is BASELINE_TOKEN, which has CONTENTS but no ISSUES
+            # permission -- posting through it 403s. IPS_ISSUE_TOKEN is the
+            # repo GITHUB_TOKEN, which can comment. Same reason the blocker
+            # lookups below use it.
+            GH_TOKEN="$IPS_ISSUE_TOKEN" \
             gh api -X POST "/repos/${REPO}/issues/${ISSUE_NUMBER}/comments" \
               -F body=@"$NOTE" >/dev/null 2>&1 \
               || echo "::warning::Could not comment on #${ISSUE_NUMBER}."
@@ -184,7 +189,13 @@ jobs:
             printf '%s\n' "returns to Todo — summon \`@claude\` again then, or remove the \`blocked\` label to"
             printf '%s\n' "override."
           } > "$NOTE"
-          gh api "/repos/${REPO}/issues/${ISSUE_NUMBER}/comments" -F body=@"$NOTE" >/dev/null 2>&1 || true
+          # Same token swap as the human-task path above. `|| true` is kept --
+          # a refusal that cannot be announced must still be a refusal -- but it
+          # no longer hides the failure, which is how this went unnoticed.
+          GH_TOKEN="$IPS_ISSUE_TOKEN" \
+          gh api -X POST "/repos/${REPO}/issues/${ISSUE_NUMBER}/comments" \
+            -F body=@"$NOTE" >/dev/null 2>&1 \
+            || echo "::warning::Could not comment on #${ISSUE_NUMBER}."
 
           {
             printf '### Dependency gate\n\n'
