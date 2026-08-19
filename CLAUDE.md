@@ -21,6 +21,16 @@ A merge is effectively irreversible and it ships code. Being asked to build some
 the same as being cleared to release it. When in doubt, open the PR, say exactly what you
 would have merged and why, and let Joshua decide.
 
+**Enforcement is partial, and you should know which side of it you are on.** As of
+2026-08-19 an org ruleset is **Active on `infinite-media` only**, where `verify` is a
+required status check and a failing `verify` genuinely blocks the merge. **Every other repo
+has no ruleset and no branch protection on `main`** — a token with `contents: write` can
+push straight to it, and this rule is the only thing holding.
+
+So in eight of nine repos, following this is a real constraint rather than a formality.
+Do not read a green check as permission. See infinite-cortex#342 for the rollout and
+infinite-cortex#327 for what remains.
+
 Everything up to the merge is yours: branch, commit, push the branch, open the PR, write a
 description that says what changed and how you verified it, and label the issue. The final
 click is not.

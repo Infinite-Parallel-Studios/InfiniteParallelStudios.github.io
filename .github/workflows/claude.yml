@@ -363,6 +363,55 @@ jobs:
           gh api -X POST "/repos/${REPO}/issues/${ISSUE}/comments" \
             -F body=@"$BODY_FILE" >/dev/null || true
 
+      # Every job that checks out a repo leaves its checkout -- node_modules
+      # included -- in $GITHUB_WORKSPACE when it finishes. A cloud runner throws
+      # that away with the VM; a self-hosted one (ops-runner, ops-runner-2) keeps
+      # it on disk between jobs, so it silently accumulates until someone notices
+      # the box is full -- infinite-forge#83 found ~4 GB of finished-job checkouts
+      # this way, most from repos that had not been built in days.
+      #
+      # `if: always()` so a failing job cleans up too: a failed job's workspace is
+      # exactly as stale as a passing one's, and arguably more likely to be large
+      # (a job that died mid-install leaves node_modules half-populated, not
+      # smaller for it). `continue-on-error: true` so a cleanup that itself fails
+      # -- a permission problem, say -- never turns a job that otherwise passed
+      # into a failure over a directory it could not delete.
+      #
+      # Only $GITHUB_WORKSPACE, this job's own checkout, is touched. That is the
+      # safe unit because a self-hosted runner services one job at a time: this
+      # cannot reach another runner's directory, another repo's, or a job still
+      # in progress. It never touches `_work/_tool` or `_work/_actions` -- those
+      # are shared caches one level up in `_work`, siblings of this repo's
+      # directory rather than inside it, so removing only $GITHUB_WORKSPACE can
+      # never reach them. It also never touches `_work/_PipelineMapping`: that
+      # file records which folder name this repo+workflow pair is assigned, not
+      # what is currently on disk there, so deleting the checkout and leaving the
+      # mapping alone is exactly what lets the next job's checkout land back in
+      # the same place instead of a new one.
+      - name: Clean up job workspace
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "Before cleanup:"
+          du -sh "$GITHUB_WORKSPACE" 2>/dev/null || echo "  (already gone)"
+          cd "$RUNNER_TEMP"
+          # Empty the workspace, then RECREATE IT. Deleting the directory itself
+          # breaks the post-job teardown that runs after this step: the runner
+          # spawns actions/checkout's post step with cwd = $GITHUB_WORKSPACE, and
+          # a missing cwd fails the whole job with
+          #   "An error occurred trying to start process ... No such file or
+          #    directory"
+          # even though this step is `continue-on-error`. continue-on-error covers
+          # THIS step; it does not cover teardown that happens afterwards.
+          #
+          # An empty directory satisfies the spawn and reclaims exactly as much
+          # space as removing it did -- the bytes are in the contents, not the
+          # inode.
+          rm -rf "$GITHUB_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE"
+          echo "After cleanup:"
+          du -sh "$GITHUB_WORKSPACE" 2>/dev/null || echo "  (gone)"
+
   # Runs alongside the agent, not after it, so the card reflects reality while
   # the work is actually happening rather than once it is over.
   board-in-progress:

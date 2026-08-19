@@ -167,6 +167,35 @@ jobs:
           run_task typecheck
           run_task test
 
+      # Same reasoning as claude.yml's "Clean up job workspace" step: only
+      # $GITHUB_WORKSPACE is removed (never `_tool`, `_actions`, or
+      # `_PipelineMapping` -- see infinite-forge#83), `if: always()` so a failed
+      # build's checkout does not survive either, and `continue-on-error: true`
+      # so a cleanup failure never flips a passing job to failed.
+      - name: Clean up job workspace
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "Before cleanup:"
+          du -sh "$GITHUB_WORKSPACE" 2>/dev/null || echo "  (already gone)"
+          cd "$RUNNER_TEMP"
+          # Empty the workspace, then RECREATE IT. Deleting the directory itself
+          # breaks the post-job teardown that runs after this step: the runner
+          # spawns actions/checkout's post step with cwd = $GITHUB_WORKSPACE, and
+          # a missing cwd fails the whole job with
+          #   "An error occurred trying to start process ... No such file or
+          #    directory"
+          # even though this step is `continue-on-error`. continue-on-error covers
+          # THIS step; it does not cover teardown that happens afterwards.
+          #
+          # An empty directory satisfies the spawn and reclaims exactly as much
+          # space as removing it did -- the bytes are in the contents, not the
+          # inode.
+          rm -rf "$GITHUB_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE"
+          echo "After cleanup:"
+          du -sh "$GITHUB_WORKSPACE" 2>/dev/null || echo "  (gone)"
+
   # ---------------------------------------------------------------------------
   # The board must agree with the check.
   #
@@ -288,3 +317,30 @@ jobs:
 
             You are NOT the merge gate and you must not merge, approve, or
             request changes. Joshua reads this and decides.
+
+      # Same reasoning as claude.yml's "Clean up job workspace" step. This job
+      # checks out with fetch-depth: 0 (full history for the review), which is
+      # exactly the kind of checkout worth not leaving behind.
+      - name: Clean up job workspace
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "Before cleanup:"
+          du -sh "$GITHUB_WORKSPACE" 2>/dev/null || echo "  (already gone)"
+          cd "$RUNNER_TEMP"
+          # Empty the workspace, then RECREATE IT. Deleting the directory itself
+          # breaks the post-job teardown that runs after this step: the runner
+          # spawns actions/checkout's post step with cwd = $GITHUB_WORKSPACE, and
+          # a missing cwd fails the whole job with
+          #   "An error occurred trying to start process ... No such file or
+          #    directory"
+          # even though this step is `continue-on-error`. continue-on-error covers
+          # THIS step; it does not cover teardown that happens afterwards.
+          #
+          # An empty directory satisfies the spawn and reclaims exactly as much
+          # space as removing it did -- the bytes are in the contents, not the
+          # inode.
+          rm -rf "$GITHUB_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE"
+          echo "After cleanup:"
+          du -sh "$GITHUB_WORKSPACE" 2>/dev/null || echo "  (gone)"
