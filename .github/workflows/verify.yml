@@ -1,290 +1,86 @@
-# MANAGED BY THE ORG BASELINE RECONCILER — infinite-forge/baseline/workflows/verify.yml
-# Edit it there; local edits are overwritten by the next reconciler PR.
+# ─────────────────────────────────────────────────────────────────────────────
+# REPO-LOCAL. This file is deliberately NOT the org baseline verify.yml, and
+# baseline/manifest.json skips this repo for that entry (infinite-forge).
 #
-# Two parts, one file, because the second needs the first's results and a
-# workflow_run trigger would run the DEFAULT branch's copy — which means a
-# change to either half could never be tested on the PR that makes it.
+# WHY THE BASELINE VERSION CANNOT WORK HERE
 #
-#   verify   npm ci, build, typecheck, test. The check on the PR.
-#   review   @claude reads the diff, the ticket and the CI outcome, and posts
-#            one review.
+# The baseline verify.yml calls a reusable workflow from a PRIVATE repo:
 #
-# Neither merges anything. They exist to make "Ready for Review" mean something:
-# before this, that column was set by a PR existing, so a branch that did not
-# compile looked exactly like one that did.
+#   uses: Infinite-Parallel-Studios/infinite-forge/.github/workflows/board-reusable.yml@main
 #
-# What it is built to catch, all of which reached a PR on 2026-08-07:
+# This repository is PUBLIC, and a public repository cannot use a reusable
+# workflow from a private one. forge's workflow access level is
+# `organization`, which shares it with other PRIVATE org repos and does not
+# extend to public ones.
 #
-#   * package.json edited, package-lock.json not regenerated. `npm ci` fails on
-#     this and nothing else does — `npm install` silently repairs it locally.
-#     The EAS build would have been the first thing to notice.
-#   * a required prop added to a component shared by two screens, with only one
-#     updated. Typecheck, in a workspace nobody thought to check.
-#   * a transitive type that stopped resolving because a dependency was not
-#     hoisted. Typecheck again, and invisible to any test.
-#   * logic that a green suite still missed — a fallback that spoke a truncated
-#     answer, a subprocess that leaked descriptors on timeout. Those are what
-#     `review` is for. It reads; it does not run.
-
+# GitHub rejects the whole file at load time rather than failing a job, so the
+# run ended `failure` with ZERO jobs in ZERO seconds and NO `verify` check was
+# ever produced. With `verify` a required status check org-wide, that left
+# every PR here permanently blocked by a check that could never report.
+#
+# `if:` does not help: `uses:` is resolved when the workflow is loaded, before
+# any condition is evaluated.
+#
+# WHAT THIS CHECKS, AND WHY IT IS REAL
+#
+# This is a Jekyll site (Gemfile, _config.yml, CNAME), so the honest check is
+# the one the repo already declares for itself in pages-deploy.yml: build the
+# site, then run html-proofer, which is already a `:test` group gem in the
+# Gemfile. A broken Liquid tag, bad front matter, an invalid _config.yml or a
+# dead internal link fails this — which is exactly what would break the
+# published site.
+#
+# It is deliberately NOT a no-op that reports success. There is no package.json
+# here, so the baseline's node path would have skipped everything and reported
+# green on any change — protection that reads as real and is not.
+#
+# runs-on: ubuntu-latest, not the homelab runner. Two reasons, both binding:
+# self-hosted runners must not serve a PUBLIC repo, because a fork PR would run
+# arbitrary code on the box; and Actions minutes are free for public
+# repositories, so the org's private-repo exhaustion does not apply here.
+# ─────────────────────────────────────────────────────────────────────────────
 name: Verify
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened]
 
 permissions:
-  # Declaring any permission replaces the default set rather than adding to it,
-  # so everything needed is listed explicitly.
   contents: read
-  pull-requests: write
-  issues: write
 
 concurrency:
-  # A force-push mid-run should not leave two verdicts racing to label the same
-  # PR. Newest push wins.
   group: verify-${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
+  # The job name IS the required check name. Do not rename it.
   verify:
     name: verify
-    # Secrets are not exposed to fork PRs, and a fork cannot be trusted with the
-    # self-hosted runner regardless.
-    if: github.event.pull_request.head.repo.fork != true
-    # Follows the runner auto-switcher, like the agent job in claude.yml.
-    runs-on: ${{ fromJSON(vars.RUNNER_LABELS || '"ubuntu-latest"') }}
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Is there anything to verify?
-        id: detect
-        run: |
-          set -euo pipefail
-          # The baseline puts this workflow in every repo, including ones with
-          # no Node project at all (infinite-forge is shell and workflows). A
-          # repo with nothing to build must pass, not fail — an empty check
-          # that goes red teaches people to ignore checks.
-          if [ -f package.json ] && [ -f package-lock.json ]; then
-            echo "node=true" >> "$GITHUB_OUTPUT"
-            echo "Node project detected."
-          else
-            echo "node=false" >> "$GITHUB_OUTPUT"
-            echo "No package.json + package-lock.json — nothing to verify."
-          fi
-
-      - uses: actions/setup-node@v4
-        if: steps.detect.outputs.node == 'true'
-        with:
-          node-version: 22
-
-      # THE ONE THAT MATTERS MOST, AND IT IS FIRST ON PURPOSE.
-      #
-      # `npm ci` is the only command that fails when package.json and the
-      # lockfile disagree; `npm install` quietly fixes it and moves on, so the
-      # mismatch survives every local check and lands in CI or, worse, in a
-      # device build. It is also what the Dockerfile and EAS run, so a failure
-      # here is a failure of the real build, not of a CI-shaped approximation.
-      - name: npm ci
-        if: steps.detect.outputs.node == 'true'
-        run: npm ci
-
-      # ORDER MATTERS, and `npm run <task> --workspaces` does not respect it.
-      #
-      # It walks workspaces in declaration order, so a workspace that compiles
-      # against a sibling's emitted .d.ts can be built before that sibling
-      # exists. The first version of this file did exactly that and failed a
-      # healthy PR with 60 lines of "Cannot find module '@cortex/shared'" —
-      # reproducing the very stale-artifact problem the step was added to
-      # prevent.
-      #
-      # So: prefer the repo's own root script. That is where the dependency
-      # graph is already declared (turbo's dependsOn ^build, or equivalent),
-      # and the repo owns it. Only fall back to iterating workspaces when there
-      # is no root script to defer to — at which point ordering is
-      # unknowable from here anyway, and it is announced in the log.
-      - name: Build, typecheck, test
-        if: steps.detect.outputs.node == 'true'
-        run: |
-          set -euo pipefail
-
-          has_root_script() {
-            node -e "const s=require('./package.json').scripts||{};process.exit(s['$1']?0:1)"
-          }
-
-          # `--if-present` forgives a missing SCRIPT. It does not forgive a
-          # missing `workspaces` field: `npm run x --workspaces` on a
-          # single-package repo exits 1 with "No workspaces found!". That is why
-          # this workflow failed on every infinite-forge PR for a week — forge is
-          # a single Next.js package, so `build` found a root script and ran,
-          # then `typecheck` fell through to the workspace branch and died.
-          #
-          # A repo with nothing to run must pass, not fail. Same principle as the
-          # detect step above: a check that goes red for a task the repo does not
-          # have teaches people to ignore checks.
-          has_workspaces() {
-            node -e "const w=require('./package.json').workspaces||[];process.exit((Array.isArray(w)?w.length:Object.keys(w).length)?0:1)"
-          }
-
-          # Catches the near-miss that silently costs you coverage: a repo with
-          # `type-check` and no `typecheck` would otherwise skip in total
-          # silence, looking identical to a repo that genuinely has no such task.
-          suggest_alias() {
-            node -e "
-              const s=Object.keys(require('./package.json').scripts||{});
-              const norm=x=>x.replace(/[-_]/g,'').toLowerCase();
-              const hit=s.find(x=>norm(x)===norm('$1')&&x!=='$1');
-              if (hit) console.log(hit);
-            "
-          }
-
-          run_task() {
-            local task="$1"
-            if has_root_script "$task"; then
-              echo "::group::$task (root script — the repo's own task graph)"
-              npm run "$task"
-            elif has_workspaces; then
-              echo "::group::$task (per workspace — no root script to defer to)"
-              echo "::warning::No root \"$task\" script; running it per workspace, so"
-              echo "::warning::inter-workspace ordering is not guaranteed."
-              npm run "$task" --workspaces --if-present
-            else
-              echo "::group::$task (skipped — single-package repo with no \"$task\" script)"
-              local alias
-              alias="$(suggest_alias "$task")"
-              if [ -n "$alias" ]; then
-                echo "::warning::No \"$task\" script, but this repo has \"$alias\"."
-                echo "::warning::That task is NOT being run. Rename it to \"$task\" or add an alias,"
-                echo "::warning::or this check passes while verifying nothing."
-              else
-                echo "Nothing to run: no root \"$task\" script and no workspaces."
-              fi
-            fi
-            echo "::endgroup::"
-          }
-
-          # Build first: everything downstream reads the emitted .d.ts.
-          run_task build
-          run_task typecheck
-          run_task test
-
-  # ---------------------------------------------------------------------------
-  # The board must agree with the check.
-  #
-  # Split into two jobs rather than one with a conditional, because a reusable
-  # workflow call cannot be conditional on anything computed inside a job.
-  # ---------------------------------------------------------------------------
-  mark-not-ready:
-    needs: verify
-    if: always() && needs.verify.result == 'failure'
-    uses: Infinite-Parallel-Studios/infinite-forge/.github/workflows/board-reusable.yml@main
-    secrets: inherit
-    with:
-      event_name: ci
-      action: failed
-      repo: ${{ github.repository }}
-      pr_node_id: ${{ github.event.pull_request.node_id }}
-      pr_number: ${{ format('{0}', github.event.pull_request.number) }}
-      pr_head_ref: ${{ github.event.pull_request.head.ref }}
-
-  mark-ready:
-    needs: verify
-    if: always() && needs.verify.result == 'success'
-    uses: Infinite-Parallel-Studios/infinite-forge/.github/workflows/board-reusable.yml@main
-    secrets: inherit
-    with:
-      event_name: ci
-      action: passed
-      repo: ${{ github.repository }}
-      pr_node_id: ${{ github.event.pull_request.node_id }}
-      pr_number: ${{ format('{0}', github.event.pull_request.number) }}
-      pr_head_ref: ${{ github.event.pull_request.head.ref }}
-
-  # ---------------------------------------------------------------------------
-  # PART B — the reviewer.
-  #
-  # Runs on `opened` only. A review per push would bury the one that matters,
-  # and the expensive half of reviewing is reading the diff against the ticket,
-  # which does not change meaningfully between pushes.
-  #
-  # `always()` so a red build still gets reviewed: a failing PR is exactly when
-  # a second opinion is worth having, and the CI outcome is handed to the
-  # prompt rather than used as a gate.
-  # ---------------------------------------------------------------------------
-  review:
-    needs: verify
-    if: always() && github.event.action == 'opened' && github.event.pull_request.head.repo.fork != true
-    # `verify` above already runs on the box and this job `needs` it, so this
-    # adds no contention: it runs in the slot verify has just released.
-    runs-on: [self-hosted, homelab]
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: anthropics/claude-code-action@v1
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # Tag mode: posts one tracked comment on the PR rather than opening a
-          # formal review with an approve/request-changes verdict. Deliberate —
-          # a verdict from a reviewer that cannot merge is theatre, and the
-          # merge gate is Joshua's.
-          track_progress: true
-          prompt: |
-            Review this pull request and post ONE concise review comment.
+          ruby-version: 3.3
+          bundler-cache: true
 
-            CI has already run on this PR and its outcome is
-            `${{ needs.verify.result }}`. Do not re-run the tests or the
-            typecheck — read, reason, and say what a build cannot tell you.
-            If CI failed, read the failing job's log and lead with that.
+      # The same build the deploy runs. If this fails, the published site would
+      # have failed too — which is the point of checking it before merge.
+      - name: Build site
+        run: bundle exec jekyll b -d _site
+        env:
+          JEKYLL_ENV: production
 
-            Read before you judge:
-              * the full diff of this PR
-              * the issue it closes, and its acceptance criteria — the PR body
-                names it, usually as "Closes #N"
-              * the surrounding existing code the diff touches, not just the
-                changed lines. Most of the bugs worth catching are in how the
-                change meets what was already there.
-
-            Cover, in this order, and skip any heading with nothing real under
-            it — a review padded with "no issues found" sections is one nobody
-            reads twice:
-
-            1. ACCEPTANCE CRITERIA. Go through the ticket's checklist and say
-               which items the diff actually satisfies. An unmet criterion is
-               blocking. "The PR says it does X" is not evidence that it does.
-            2. LOGIC AND EDGE CASES. Empty, missing, malformed and duplicate
-               inputs; ordering and races between an await and the state a
-               later line reads; a fallback that silently substitutes something
-               the ticket forbade.
-            3. RESOURCE LIFECYCLE. Every subprocess, file descriptor, temp
-               file, audio player, microphone, timer and listener: is it
-               released on the error path and the timeout path, not just the
-               happy one? Killing a process is not the same as killing what it
-               spawned.
-            4. SAFETY CONTRACTS. Does this break the existing path for users
-               who do not use the new feature? Does it degrade gracefully when
-               a dependency is absent, or does it fail in a way that looks like
-               something else?
-            5. VERSION SKEW. The app and the backend deploy independently and
-               the app usually ships first. A new response field must be
-               optional, and undefined must mean "unknown" rather than a
-               TypeError.
-            6. LEAKS. Secrets, tokens, or server filesystem paths in responses,
-               logs, or error messages that reach a client.
-
-            Mark every finding as either BLOCKING (merging this causes a
-            defect) or NIT (worth doing, not worth blocking). Be specific:
-            name the file and line, and say what input or sequence produces the
-            failure. A finding nobody can reproduce from your description is
-            not yet a finding.
-
-            If the change is genuinely sound, say so briefly and stop. Do not
-            manufacture findings to look thorough.
-
-            You are NOT the merge gate and you must not merge, approve, or
-            request changes. Joshua reads this and decides.
+      # html-proofer is already a :test group gem in the Gemfile. External
+      # links are disabled: a third-party outage is not a reason to block a
+      # merge, and it would make this check fail by luck rather than by fault.
+      - name: Test site
+        run: |
+          bundle exec htmlproofer _site \
+            --disable-external \
+            --ignore-urls "/^http:\/\/127.0.0.1/,/^http:\/\/0.0.0.0/,/^http:\/\/localhost/"
