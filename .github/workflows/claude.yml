@@ -202,6 +202,183 @@ jobs:
             printf '`#%s` not started — blocked by: %s\n' "$ISSUE_NUMBER" "$LIST"
           } >> "$GITHUB_STEP_SUMMARY"
 
+
+  # THE ELIGIBILITY GATE (infinite-cortex#334).
+  #
+  # Overnight runs work only tickets that can be verified against the plan
+  # rather than against a description of it. #334 was filed as "add the Fit
+  # control, section 10 done-list otherwise conforms" when two of that
+  # section's eight items were implemented; an agent working it as written
+  # would have shipped one control and closed a phase barely begun.
+  #
+  # NOT ARMED. `enforce` is false unless the org variable
+  # TICKET_ELIGIBILITY_ENFORCE is exactly 'true'. Until then this job computes
+  # the verdict, annotates the run and comments once on an ineligible ticket,
+  # and the `claude` job does NOT depend on it. That is deliberate: every open
+  # ticket today lacks a plan hash, so arming before remediation would make the
+  # entire backlog ineligible in one move. Observing first is what produces the
+  # evidence for when to arm.
+  #
+  # SCOPE: auto-dispatch only. A human typing @claude is choosing to; this
+  # exists for when nobody is choosing. Applied to every run it would also halt
+  # the seven repos that have no plan files at all.
+  #
+  # FAILS CLOSED, unlike dependency-gate above. That one fails open because an
+  # unavailable dependency service must not stop every agent in the org, and a
+  # ticket built too early is recoverable. This one guards an agent building to
+  # a specification nobody checked, which is not recoverable by noticing later.
+  eligibility-gate:
+    #
+    # TWO unattended entry points, not one.
+    #
+    #   1. an auto-dispatch COMMENT — the blocked-ticket release path
+    #   2. an issue OPENED with @claude in its body — the filing convention
+    #
+    # (2) was missed on the first pass and is the one that mattered. The
+    # `@claude` line in a filed issue is the trigger, so intake and any
+    # hand-filed ticket start an agent the moment they are created. That is
+    # Path 2 — hand-filed tickets — which is the whole reason this gate exists,
+    # and infinite-cortex#356 is the proof: #334 was worked and a PR merged
+    # that closed a ticket it covered one eighth of.
+    #
+    # A person typing @claude in a COMMENT stays ungated, as ruled. That is a
+    # human choosing per-run. A body carrying @claude is not a choice about
+    # this run; it is a filing convention that starts an unattended agent.
+    if: |
+      (github.event_name == 'issue_comment' &&
+       !github.event.issue.pull_request &&
+       contains(github.event.comment.body, '@claude') &&
+       contains(github.event.comment.body, 'ips-auto-dispatch')) ||
+      (github.event_name == 'issues' &&
+       github.event.action == 'opened' &&
+       contains(github.event.issue.body, '@claude'))
+    runs-on: [self-hosted, homelab]
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      verdict: ${{ steps.check.outputs.verdict }}
+      eligible: ${{ steps.check.outputs.eligible }}
+      enforce: ${{ steps.check.outputs.enforce }}
+    steps:
+      - name: Decide eligibility
+        id: check
+        env:
+          # EXACTLY the dependency-gate split above. BASELINE_TOKEN carries
+          # CONTENTS across repos; GITHUB_TOKEN is scoped to THIS repo and can
+          # read its issues but not infinite-forge's files.
+          #
+          # The first version of this job used GITHUB_TOKEN for everything. It
+          # could not fetch its own library, failed closed on every ticket, and
+          # blocked an eligible one — proving the gate refuses and leaving it
+          # unproven that it ever passes. Third silent token-scope failure on
+          # this system: the dependency gate, the release path, and now this.
+          GH_TOKEN: ${{ secrets.BASELINE_TOKEN || secrets.GITHUB_TOKEN }}
+          IPS_ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORGE: Infinite-Parallel-Studios/infinite-forge
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          ENFORCE: ${{ vars.TICKET_ELIGIBILITY_ENFORCE }}
+          PLAN_REPO: Infinite-Parallel-Studios/infinite-cortex
+        run: |
+          set -uo pipefail
+
+          # ── PREFLIGHT ────────────────────────────────────────────────────
+          # Declare what the token can actually READ, at the top, in the shape
+          # blocked-deps.lib.sh's issue_read_preflight established: print "ok"
+          # or a one-line reason, never fail here.
+          #
+          # It is inline rather than in the library on purpose — fetching the
+          # library IS a cross-repo contents read, so a preflight that lived
+          # there could not run when it was needed. This is the check that
+          # would have made the previous failure loud instead of a confident
+          # "skip:no plan citation" downstream.
+          echo "::group::token preflight"
+          if OUT=$(gh api "/repos/${FORGE}/contents/.github/scripts/ticket-eligibility.lib.sh?ref=main" --jq '.name' 2>&1); then
+            echo "Contents token: can read ${FORGE} (${OUT})."
+          else
+            echo "::error::Contents token CANNOT READ ${FORGE}: $(printf '%s' "$OUT" | head -1)"
+            echo "::error::The gate cannot fetch its own library and will refuse every ticket."
+          fi
+          if OUT=$(gh api "/repos/${PLAN_REPO}/contents/cortex-master-plan.md?ref=main" --jq '.name' 2>&1); then
+            echo "Contents token: can read the plan in ${PLAN_REPO} (${OUT})."
+          else
+            echo "::error::Contents token CANNOT READ the plan in ${PLAN_REPO}: $(printf '%s' "$OUT" | head -1)"
+            echo "::error::Every drift comparison will be unverifiable and refuse."
+          fi
+          if OUT=$(GH_TOKEN="$IPS_ISSUE_TOKEN" gh api "/repos/${REPO}/issues?per_page=1" --jq 'length' 2>&1); then
+            echo "Issue token: can read issues in ${REPO}."
+          else
+            echo "::error::Issue token CANNOT READ ISSUES: $(printf '%s' "$OUT" | head -1)"
+            echo "::error::Every ticket will read as unreadable and refuse."
+          fi
+          echo "::endgroup::"
+
+          # The one copy, fetched rather than carried — same reason as
+          # blocked-deps.lib.sh: this workflow runs in all eight repos, so a
+          # script living in infinite-forge is not on this runner. Fetched the
+          # same way that library is, not a variation of it.
+          LIB="$RUNNER_TEMP/ticket-eligibility.lib.sh"
+          if ! gh api "/repos/${FORGE}/contents/.github/scripts/ticket-eligibility.lib.sh?ref=main" \
+                 --jq '.content' 2>/dev/null | base64 -d > "$LIB" || [ ! -s "$LIB" ]; then
+            echo "::error::could not fetch the eligibility library — failing closed"
+            echo "verdict=skip:could not fetch the eligibility library" >> "$GITHUB_OUTPUT"
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "enforce=${ENFORCE:-}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # shellcheck source=/dev/null
+          source "$LIB"
+
+          # Exit status checked explicitly: `gh api` prints its error payload to
+          # STDOUT, so an unchecked failure arrives looking like a ticket body.
+          # The library catches that too; both, because this is the fail-closed
+          # path and one guard is not a guard.
+          #
+          # Issues are read with the ISSUE token, contents with GH_TOKEN — the
+          # same split as dependency-gate, for the same reason.
+          if ! BODY="$(GH_TOKEN="$IPS_ISSUE_TOKEN" gh api "repos/${REPO}/issues/${ISSUE}" --jq '.body')"; then
+            BODY=""
+          fi
+
+          PLAN_HEAD="$(gh api "repos/${PLAN_REPO}/commits/main" --jq '.sha' 2>/dev/null || echo "")"
+          if [ -z "$PLAN_HEAD" ]; then
+            VERDICT="skip:could not resolve the plan HEAD — cannot verify, so not run"
+          else
+            VERDICT="$(eligibility_verdict "$BODY" "$PLAN_HEAD")"
+          fi
+
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "enforce=${ENFORCE:-}" >> "$GITHUB_OUTPUT"
+          if [ "$VERDICT" = "eligible" ]; then
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::ticket #${ISSUE} is eligible (plan-verifiable)"
+          else
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::ticket #${ISSUE} ${VERDICT}"
+            if [ "${ENFORCE:-}" = "true" ]; then
+              # Flagged, never interpreted. The label is what makes a skipped
+              # ticket visible on the board rather than silently not-run.
+              GH_TOKEN="$IPS_ISSUE_TOKEN" gh api -X POST "/repos/${REPO}/issues/${ISSUE}/labels" \
+                -f 'labels[]=needs-plan-citation' >/dev/null 2>&1 || true
+              BODY_FILE="$RUNNER_TEMP/skip.md"
+              {
+                printf '**Skipped by the eligibility gate — not run, not interpreted.**\n\n'
+                printf '%s\n\n' "${VERDICT#skip:}"
+                printf 'Overnight runs work only tickets that can be checked against the plan itself. '
+                printf 'A ticket without a verbatim checklist and a plan commit can only be checked against a description of it, '
+                printf 'and infinite-cortex#334 is what that produces.\n\n'
+                printf 'This is not a judgement that the ticket is wrong — unverifiable and wrong are different things. '
+                printf 'It means a human works it rather than an agent picking it up unattended.\n'
+                if [ "${VERDICT#skip:STALE}" != "$VERDICT" ]; then
+                  printf '\n---\n\n'
+                  staleness_report "$BODY" "$PLAN_HEAD"
+                fi
+              } > "$BODY_FILE"
+              GH_TOKEN="$IPS_ISSUE_TOKEN" gh api -X POST "/repos/${REPO}/issues/${ISSUE}/comments" -F body=@"$BODY_FILE" >/dev/null 2>&1 || true
+            fi
+          fi
+
   claude:
     # always(): the gate is skipped entirely for PR-review events, and a skipped
     # need would otherwise skip this job with it. But `always()` alone also lets a
@@ -210,11 +387,31 @@ jobs:
     # reachable now that it runs on the homelab box, which can be busy or down.
     # So: 'skipped' still proceeds (PR-review events), 'failure'/'cancelled' do
     # not. Both refusals -- `Blocked by #N` and `human-task` -- live in that job.
-    needs: dependency-gate
+    #
+    # The eligibility gate is wired here but INERT until the org variable
+    # TICKET_ELIGIBILITY_ENFORCE is exactly 'true'. Arming is that flip alone,
+    # not a second workflow edit.
+    #
+    # The clause order is what makes both directions correct, and it is read
+    # against `vars` rather than the gate's outputs on purpose. A failed or
+    # cancelled job produces EMPTY outputs, so a condition written as
+    # `outputs.enforce != 'true'` would let a broken gate through — the exact
+    # shape the dependency-gate comment above describes, and the one that was
+    # reachable the moment that job moved to the homelab box.
+    #
+    #   unarmed                      -> first clause true, gate can never block
+    #   armed, human @claude         -> gate skipped, proceeds
+    #   armed, auto-dispatch, ok     -> eligible == 'true', proceeds
+    #   armed, auto-dispatch, not ok -> nothing true, blocked
+    #   armed, gate failed/cancelled -> nothing true, blocked (fails CLOSED)
+    needs: [dependency-gate, eligibility-gate]
     if: |
       always() &&
       (needs.dependency-gate.result == 'success' || needs.dependency-gate.result == 'skipped') &&
       needs.dependency-gate.outputs.blocked != 'true' &&
+      (vars.TICKET_ELIGIBILITY_ENFORCE != 'true' ||
+      needs.eligibility-gate.result == 'skipped' ||
+      (needs.eligibility-gate.result == 'success' && needs.eligibility-gate.outputs.eligible == 'true')) &&
       ((github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
@@ -333,9 +530,70 @@ jobs:
           echo "matched=${NAME}" >> "$GITHUB_OUTPUT"
           echo "Activated ${NAME} ($(wc -l < "$OUT") lines) via CLAUDE.md."
 
+      # WHY AN ALLOWLIST EXISTS AT ALL
+      #
+      # Without it every Bash command needs interactive approval, and an
+      # unattended run has nobody to approve. Five runs on 2026-08-22 all
+      # reported the same thing: `npm`, `npx`, `node -e` and `gh` were refused,
+      # so none could run `tsc` or the test suite. Two shipped branches they had
+      # only hand-audited; one (infinite-cortex#366) stopped at needs-context
+      # precisely because its acceptance required watching `tsc` fail and it
+      # could not run `tsc`.
+      #
+      # That is the objective defeated: an agent that cannot run the toolchain
+      # hands over unverified work every night.
+      #
+      # WHAT THIS DOES NOT RELAX
+      #
+      # Nothing about the merge path. `verify` still runs in CI and still
+      # blocks; the eligibility gate still refuses ineligible tickets; the
+      # dependency and human-task guards are untouched; nothing merges, enables
+      # auto-merge, or pushes to a default branch. The agent gaining the ability
+      # to run tests locally does not give it the ability to land anything —
+      # those are separate mechanisms and this touches only the first.
+      #
+      # Read/write of the repository was already available: the runs pushed
+      # branches. This grants the toolchain that inspects what was pushed.
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Deliberately enumerated, not `Bash(*)`. Each entry is here because a
+          # real run was blocked by its absence.
+          #
+          #   npm / npx  — typecheck and the test suite, the whole point
+          #   node       — one-off checks the suite does not cover
+          #   gh         — read PR/issue/branch state, which CLAUDE.md's
+          #                "check what is already in flight" step requires and
+          #                which every run on 2026-08-22 was refused
+            #   bash       — RESTORING what enumerating this list removed by
+            #                accident, not widening it. Before an allowlist existed,
+            #                the agent's Bash tool ran scripts directly; naming four
+            #                interpreters silently revoked the shell itself.
+            #                infinite-cortex#381's
+            #                `scripts/ci/attribute-test-failure.sh` is invoked exactly
+            #                as `bash scripts/ci/... -- <check>`, so without this the
+            #                base-commit attribution an unattended run is INSTRUCTED
+            #                to use is the one thing it cannot run.
+            #
+            #                Note what this means for the list below: a shell can
+            #                invoke anything, so "NOT granted" is a rule the agent
+            #                follows, not a capability wall. It was never a wall — the
+            #                enumeration briefly made it look like one. The merge
+            #                gate's real enforcement is branch protection and the
+            #                `Refs`-not-`Closes` pipeline, neither of which is an
+            #                agent permission.
+          #
+          # NOT granted, and each omission is a decision:
+          #   * no `git push --force`, no `gh pr merge`, no `gh api -X PUT|POST`
+          #     on merge endpoints — the merge gate is a rule AND a capability
+          #     boundary, and this must not quietly widen it
+          #   * no `docker`, no `systemctl`, no `sudo` — an agent run must not
+          #     be able to change the box it runs on
+          #   * no `curl`/`wget` — outbound fetch is how an unattended run
+          #     acquires something nobody reviewed
+          claude_args: >-
+            --allowedTools
+            Bash(npm:*),Bash(npx:*),Bash(node:*),Bash(gh:*),Bash(bash:*)
 
       # A specialist that was asked for and does not exist is a gap in the
       # roster, not a reason to fail. The run already proceeded as the
@@ -363,6 +621,55 @@ jobs:
           gh api -X POST "/repos/${REPO}/issues/${ISSUE}/comments" \
             -F body=@"$BODY_FILE" >/dev/null || true
 
+      # Every job that checks out a repo leaves its checkout -- node_modules
+      # included -- in $GITHUB_WORKSPACE when it finishes. A cloud runner throws
+      # that away with the VM; a self-hosted one (ops-runner, ops-runner-2) keeps
+      # it on disk between jobs, so it silently accumulates until someone notices
+      # the box is full -- infinite-forge#83 found ~4 GB of finished-job checkouts
+      # this way, most from repos that had not been built in days.
+      #
+      # `if: always()` so a failing job cleans up too: a failed job's workspace is
+      # exactly as stale as a passing one's, and arguably more likely to be large
+      # (a job that died mid-install leaves node_modules half-populated, not
+      # smaller for it). `continue-on-error: true` so a cleanup that itself fails
+      # -- a permission problem, say -- never turns a job that otherwise passed
+      # into a failure over a directory it could not delete.
+      #
+      # Only $GITHUB_WORKSPACE, this job's own checkout, is touched. That is the
+      # safe unit because a self-hosted runner services one job at a time: this
+      # cannot reach another runner's directory, another repo's, or a job still
+      # in progress. It never touches `_work/_tool` or `_work/_actions` -- those
+      # are shared caches one level up in `_work`, siblings of this repo's
+      # directory rather than inside it, so removing only $GITHUB_WORKSPACE can
+      # never reach them. It also never touches `_work/_PipelineMapping`: that
+      # file records which folder name this repo+workflow pair is assigned, not
+      # what is currently on disk there, so deleting the checkout and leaving the
+      # mapping alone is exactly what lets the next job's checkout land back in
+      # the same place instead of a new one.
+      - name: Clean up job workspace
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "Before cleanup:"
+          du -sh "$GITHUB_WORKSPACE" 2>/dev/null || echo "  (already gone)"
+          cd "$RUNNER_TEMP"
+          # Empty the workspace, then RECREATE IT. Deleting the directory itself
+          # breaks the post-job teardown that runs after this step: the runner
+          # spawns actions/checkout's post step with cwd = $GITHUB_WORKSPACE, and
+          # a missing cwd fails the whole job with
+          #   "An error occurred trying to start process ... No such file or
+          #    directory"
+          # even though this step is `continue-on-error`. continue-on-error covers
+          # THIS step; it does not cover teardown that happens afterwards.
+          #
+          # An empty directory satisfies the spawn and reclaims exactly as much
+          # space as removing it did -- the bytes are in the contents, not the
+          # inode.
+          rm -rf "$GITHUB_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE"
+          echo "After cleanup:"
+          du -sh "$GITHUB_WORKSPACE" 2>/dev/null || echo "  (gone)"
+
   # Runs alongside the agent, not after it, so the card reflects reality while
   # the work is actually happening rather than once it is over.
   board-in-progress:
@@ -382,6 +689,24 @@ jobs:
       (github.event_name == 'issue_comment' &&
         contains(github.event.comment.body, '@claude') &&
         !github.event.issue.pull_request))
+    # GITHUB_TOKEN's permissions for a called workflow come from THIS job, and
+    # declaring none leaves it on the repository default — which on the
+    # `issues: opened` path was not enough to read issues, so the lifecycle's
+    # dependency handling 403'd and the card could not be held In Progress:
+    #
+    #   Issue token CANNOT READ ISSUES: {"message":"Resource not accessible by
+    #   integration", "status":"403"}
+    #   Could not hold Status "In Progress" on issue #367 after 4 attempts.
+    #
+    # Mirrors baseline/workflows/board.yml, which already carries this set and
+    # the reason: declaring ANY permission REPLACES the default rather than
+    # adding to it, so contents and pull-requests are listed explicitly —
+    # omitting them narrows GITHUB_TOKEN to issues+metadata, which is not what
+    # the lifecycle needs.
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
     uses: Infinite-Parallel-Studios/infinite-forge/.github/workflows/board-reusable.yml@main
     secrets: inherit
     with:
@@ -510,10 +835,26 @@ jobs:
           SUBJECT=$(gh api "/repos/${REPO}/commits/${BRANCH}" --jq '.commit.message' 2>/dev/null | head -1 || true)
           TITLE="${SUBJECT:-${ISSUE_TITLE}}"
 
-          # "Closes #n" is what links the PR to the issue AND what moves both
-          # cards when board.yml sees the pull_request event.
+          # "Refs #n", NOT "Closes #n" — deliberately, and the board still moves.
+          #
+          # board-reusable.yml's find_open_pr_for_issue matches the head branch
+          # `claude/issue-<n>-` FIRST and a closing keyword only as a fallback;
+          # its own input is documented as existing to "catch claude/issue-<n>-…
+          # which GitHub does not treat as a closing reference". So Ready for
+          # Review never depended on the keyword.
+          #
+          # What the keyword also did was CLOSE the ticket on merge, and a
+          # plan-sourced ticket states every requirement of the section it
+          # derives from — so the first of eight PRs closed the whole thing.
+          # infinite-cortex#334 closed early twice this way, by two different
+          # mechanisms, caught by a human after the fact both times.
+          #
+          # ACCEPTED COST: no ticket auto-closes any more. Every ticket needs a
+          # human close, including the many that are genuinely one PR. That is
+          # the price of the board being right about multi-part work, and it was
+          # chosen rather than overlooked.
           BODY=$(printf '%s\n' \
-            "Closes #${ISSUE_NUMBER}" \
+            "Refs #${ISSUE_NUMBER}" \
             "" \
             "Opened by the Forge pipeline from \`${BRANCH}\`, which the agent pushed during [its run](${RUN_URL})." \
             "" \
@@ -550,6 +891,101 @@ jobs:
   # to end with (done / needs-context / blocked / ready-for-review). Neither
   # present leaves the card In Progress and says so — a run that stalled should
   # look stalled.
+  scope-accounting-gate:
+    # Did the run account for every item the ticket asked for?
+    # infinite-cortex#373. Between `claude` and `board-outcome`, so the verdict
+    # exists before the card is moved.
+    #
+    # UNARMED. It computes and reports; it changes nothing until the org
+    # variable SCOPE_ACCOUNTING_ENFORCE is exactly 'true'. Same shape as
+    # TICKET_ELIGIBILITY_ENFORCE, and for the reason that gate's own history
+    # records: its first armed version failed closed on every ticket and blocked
+    # an eligible one, proving it refuses and leaving it unproven that it ever
+    # passes.
+    #
+    # WHAT IT IS FOR: infinite-cortex#356 is a pull request that merged and
+    # closed a ticket it covered one eighth of. `review` passed it. The run said
+    # it was done. Nothing compared what was asked for against what was
+    # reported, because the report was prose.
+    needs: [claude, open-pr]
+    if: always() && needs.claude.result == 'success'
+    runs-on: [self-hosted, homelab]
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      verdict: ${{ steps.check.outputs.verdict }}
+      accounted: ${{ steps.check.outputs.accounted }}
+    steps:
+      - name: Account for every checklist item
+        id: check
+        env:
+          # EXACTLY the split dependency-gate and eligibility-gate use, for the
+          # same reason: BASELINE_TOKEN carries CONTENTS across repos so the
+          # library can be fetched; GITHUB_TOKEN is scoped to THIS repo and is
+          # what reads its issues.
+          GH_TOKEN: ${{ secrets.BASELINE_TOKEN || secrets.GITHUB_TOKEN }}
+          IPS_ISSUE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORGE: Infinite-Parallel-Studios/infinite-forge
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          ENFORCE: ${{ vars.SCOPE_ACCOUNTING_ENFORCE }}
+        run: |
+          set -uo pipefail
+
+          # Fetched rather than carried, the same way blocked-deps.lib.sh and
+          # ticket-eligibility.lib.sh are: this workflow runs in nine repos, so a
+          # script living in infinite-forge is not on this runner.
+          #
+          # TWO libraries: ticket_items lives beside ticket_checklist in the
+          # eligibility library (infinite-cortex#403 — they answer different
+          # questions and are kept adjacent so nobody merges them again), and the
+          # accounting logic is its own file.
+          for LIB_NAME in ticket-eligibility.lib.sh scope-accounting.lib.sh; do
+            LIB="$RUNNER_TEMP/$LIB_NAME"
+            if ! gh api "/repos/${FORGE}/contents/.github/scripts/${LIB_NAME}?ref=main"                    --jq '.content' 2>/dev/null | base64 -d > "$LIB" || [ ! -s "$LIB" ]; then
+              echo "::error::could not fetch ${LIB_NAME} — failing closed"
+              echo "verdict=refuse:could not fetch ${LIB_NAME}" >> "$GITHUB_OUTPUT"
+              echo "accounted=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # shellcheck source=/dev/null
+            source "$LIB"
+          done
+
+          # Exit status checked explicitly: `gh api` prints its error payload to
+          # STDOUT, so an unchecked failure arrives looking like a ticket body.
+          if ! BODY="$(GH_TOKEN="$IPS_ISSUE_TOKEN" gh api "repos/${REPO}/issues/${ISSUE}" --jq '.body')"; then
+            echo "::error::could not read issue #${ISSUE} — failing closed"
+            echo "verdict=refuse:could not read the ticket" >> "$GITHUB_OUTPUT"
+            echo "accounted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The run's report is in the comments it just wrote.
+          if ! REPORT="$(GH_TOKEN="$IPS_ISSUE_TOKEN"                 gh api "repos/${REPO}/issues/${ISSUE}/comments?per_page=100" --paginate                   --jq '.[].body' 2>/dev/null)"; then
+            echo "::error::could not read comments on #${ISSUE} — failing closed"
+            echo "verdict=refuse:could not read the run report" >> "$GITHUB_OUTPUT"
+            echo "accounted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VERDICT="$(scope_accounting_verdict "$BODY" "$REPORT")"
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+
+          if [ "$VERDICT" = "accounted" ]; then
+            echo "accounted=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::#${ISSUE}: every checklist item has a verdict."
+          else
+            echo "accounted=false" >> "$GITHUB_OUTPUT"
+            if [ "${ENFORCE:-}" = "true" ]; then
+              echo "::error::#${ISSUE} ${VERDICT}"
+            else
+              echo "::warning::#${ISSUE} ${VERDICT}"
+              echo "::warning::Not armed — set SCOPE_ACCOUNTING_ENFORCE=true to hold the card."
+            fi
+          fi
+
   board-outcome:
     # After the agent, after board-in-progress has settled so the two never write
     # the same card at once, and after open-pr so the PR it opens is visible to
@@ -557,8 +993,38 @@ jobs:
     # to find and falls back to the marker. `always()` keeps it running when
     # either of those was skipped; a failed agent run is not chased for an
     # outcome, since it never reached the point of reporting one.
-    needs: [claude, board-in-progress, open-pr]
+    # scope-accounting-gate is now in this list, so the verdict exists before the
+    # card is moved. It was deliberately left out when the job was added: that PR
+    # was a permission change needing a citation, and this line is pipeline
+    # wiring that does not. Landing them together would have put an unapproved
+    # structural change inside an approved permissions PR — the ride-along the
+    # separation rule exists to stop, wearing the approval of the thing it
+    # travelled with.
+    #
+    # `always()` below still carries this: if the gate fails or is skipped its
+    # verdict arrives empty, and board-reusable treats empty as "the gate did not
+    # run", which is not a failure. A broken gate must not be able to strand
+    # every card in the org at In Progress.
+    needs: [claude, board-in-progress, open-pr, scope-accounting-gate]
     if: always() && needs.claude.result == 'success'
+    # GITHUB_TOKEN's permissions for a called workflow come from THIS job, and
+    # declaring none leaves it on the repository default — which on the
+    # `issues: opened` path was not enough to read issues, so the lifecycle's
+    # dependency handling 403'd and the card could not be held In Progress:
+    #
+    #   Issue token CANNOT READ ISSUES: {"message":"Resource not accessible by
+    #   integration", "status":"403"}
+    #   Could not hold Status "In Progress" on issue #367 after 4 attempts.
+    #
+    # Mirrors baseline/workflows/board.yml, which already carries this set and
+    # the reason: declaring ANY permission REPLACES the default rather than
+    # adding to it, so contents and pull-requests are listed explicitly —
+    # omitting them narrows GITHUB_TOKEN to issues+metadata, which is not what
+    # the lifecycle needs.
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
     uses: Infinite-Parallel-Studios/infinite-forge/.github/workflows/board-reusable.yml@main
     secrets: inherit
     with:
@@ -567,3 +1033,170 @@ jobs:
       repo: ${{ github.repository }}
       issue_node_id: ${{ github.event.issue.node_id }}
       issue_number: ${{ format('{0}', github.event.issue.number) }}
+      # STILL UNARMED. accounting_enforce is the org variable, and while it is
+      # unset board-reusable reports the verdict beside a card that still moves.
+      # Setting SCOPE_ACCOUNTING_ENFORCE to 'true' is the whole of arming, and it
+      # waits until real dispatched runs have produced all three verdicts --
+      # accounted, no-checklist and a refusal -- and Joshua has watched them.
+      accounting_verdict: ${{ needs.scope-accounting-gate.outputs.verdict }}
+      accounting_enforce: ${{ vars.SCOPE_ACCOUNTING_ENFORCE }}
+
+  self-merge:
+    # The merge gate moved (infinite-cortex#300). A run may land its own PR once
+    # the checks are green -- but only a PR that does not change the pipeline
+    # doing the landing.
+    #
+    # AFTER board-outcome, deliberately. board-outcome sets Ready for Review from
+    # the presence of an OPEN PR; merging first would leave it with nothing to
+    # find and send it down the marker fallback. Ordered this way the card is set,
+    # then the merge fires, then board.yml's pull_request event moves it to Done.
+    #
+    # `always()` so a skipped board-outcome does not strand the merge, and the
+    # open-pr result is what actually gates it: no PR, nothing to merge.
+    needs: [claude, open-pr, board-outcome]
+    if: always() && needs.open-pr.result == 'success'
+    runs-on: [self-hosted, homelab]
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+    # Above SETTLE_TIMEOUT (600s) with room for the API calls around it, so the
+    # wait ends by refusing rather than by the job being killed mid-poll.
+    timeout-minutes: 20
+    steps:
+      # MINTED, NOT STORED. There is no MERGE_TOKEN secret anywhere in the org --
+      # the reconciler mints one per run the same way, and this job originally
+      # read `secrets.MERGE_TOKEN`, which resolved to empty and made every merge
+      # take the refusal path below. Fail-closed, but the feature never fired.
+      #
+      # An App INSTALLATION token records merged_by = ips-workflow-agent[bot]. A
+      # PAT would record the OWNER and inherit the owner's ruleset bypass, handing
+      # that exemption to every agent token -- which is the whole reason the merge
+      # identity is a separate token rather than the one doing everything else.
+      - name: Mint an App token for the merge call
+        id: merge_token
+        continue-on-error: true
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.IPS_APP_ID }}
+          private-key: ${{ secrets.IPS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Merge the run's own PR when the guard allows it
+        env:
+          # Same split the other gates use: BASELINE_TOKEN reads across repos so
+          # the guard library can be fetched from infinite-forge; GITHUB_TOKEN is
+          # scoped to this repo and reads its PRs and checks.
+          GH_TOKEN: ${{ secrets.BASELINE_TOKEN || secrets.GITHUB_TOKEN }}
+          IPS_REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The merging IDENTITY, exactly as the reconciler does it. An App
+          # installation token records merged_by = ips-workflow-agent[bot]; a PAT
+          # would record the OWNER and inherit an owner bypass, handing that
+          # exemption to every agent token. ABSENT MEANS REFUSE, never fall back.
+          MERGE_TOKEN: ${{ steps.merge_token.outputs.token }}
+          FORGE: Infinite-Parallel-Studios/infinite-forge
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          set -uo pipefail
+
+          LIB="$RUNNER_TEMP/self-merge-guard.sh"
+          if ! gh api "/repos/${FORGE}/contents/.github/scripts/self-merge-guard.sh?ref=main" \
+                 --jq '.content' 2>/dev/null | base64 -d > "$LIB" || [ ! -s "$LIB" ]; then
+            echo "::error::could not fetch self-merge-guard.sh -- refusing to merge"
+            exit 0
+          fi
+          # shellcheck source=/dev/null
+          source "$LIB"
+
+          # The PR this run opened, found the way board-reusable finds it: by the
+          # branch the agent pushed. open-pr exposes no output, and rediscovering
+          # is one API call against changing an existing job.
+          if ! PR_JSON=$(GH_TOKEN="$IPS_REPO_TOKEN" gh api \
+                 "/repos/${REPO}/pulls?state=open&per_page=100" \
+                 --jq "[.[] | select(.head.ref | startswith(\"claude/issue-${ISSUE}-\"))][0]"); then
+            echo "::error::could not list pull requests -- refusing to merge"
+            exit 0
+          fi
+          if [ -z "$PR_JSON" ] || [ "$PR_JSON" = "null" ]; then
+            echo "No open PR from a claude/issue-${ISSUE}-* branch. Nothing to merge."
+            exit 0
+          fi
+
+          PR_NUMBER=$(printf '%s' "$PR_JSON" | jq -r '.number')
+          PR_HEAD=$(printf '%s' "$PR_JSON" | jq -r '.head.sha')
+          echo "Considering PR #${PR_NUMBER} at ${PR_HEAD}."
+
+          if ! FILES=$(GH_TOKEN="$IPS_REPO_TOKEN" gh api \
+                 "/repos/${REPO}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename'); then
+            echo "::error::could not read the PR's file list -- refusing to merge"
+            exit 0
+          fi
+
+          # Checks are read against the HEAD SHA, not the PR, so the state proved
+          # here is the state of the commit that gets pinned below.
+          #
+          # POLLED UNTIL THE CHECKS STOP MOVING, not sampled once. This job runs
+          # after board-outcome, which is itself what starts `mark-ready` -- so a
+          # single look reads a race, and infinite-cortex#412 refused a perfectly
+          # green PR seconds after its own predecessor started a check.
+          #
+          # The loop lives in self-merge-guard.sh, not here: a wait that can only
+          # be exercised by dispatching a real run and waiting ten minutes is a
+          # wait nobody tests. There it has fixtures for settling, for timing out,
+          # and for a check that registers between two polls.
+          check_snapshot() {
+            GH_TOKEN="$IPS_REPO_TOKEN" gh api \
+              "/repos/${REPO}/commits/${PR_HEAD}/check-runs" --paginate \
+              --jq '.check_runs[] | "\(.name)|\(.status)|\(.conclusion // "")"'
+          }
+          if ! CHECKS="$(self_merge_wait_for_settle check_snapshot)"; then
+            echo "::notice::PR #${PR_NUMBER} left open for a human -- ${CHECKS}"
+            echo "- PR #${PR_NUMBER} not self-merged: ${CHECKS}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          VERDICT="$(self_merge_verdict "$FILES" "$CHECKS")"
+          if [ "$VERDICT" != "merge" ]; then
+            echo "::notice::PR #${PR_NUMBER} left open for a human -- ${VERDICT#refuse:}"
+            echo "- PR #${PR_NUMBER} not self-merged: ${VERDICT#refuse:}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # KEPT AS THE FALLBACK. The minting step is continue-on-error, so a
+          # missing IPS_APP_ID/IPS_APP_PRIVATE_KEY, or an App that cannot issue a
+          # token for this repo, lands here with an empty value rather than
+          # failing the job. Refusing is the only honest option: falling back to
+          # GH_TOKEN would merge as the owner while everything around this claims
+          # the App did it.
+          if [ -z "${MERGE_TOKEN:-}" ]; then
+            echo "::warning::PR #${PR_NUMBER} passed the guard but no merge token was minted."
+            echo "::warning::Check IPS_APP_ID and IPS_APP_PRIVATE_KEY, and that the"
+            echo "::warning::ips-workflow-agent App is installed on ${REPO}."
+            echo "::warning::Refusing rather than merging as the owner."
+            exit 0
+          fi
+
+          # --sha pins the merge to the commit the checks were read from. If
+          # anything lands on the branch in between, GitHub rejects the merge
+          # rather than landing code nothing vouched for.
+          if GH_TOKEN="$MERGE_TOKEN" gh api -X PUT \
+               "/repos/${REPO}/pulls/${PR_NUMBER}/merge" \
+               -f merge_method=squash \
+               -f sha="$PR_HEAD" \
+               -f commit_title="$(printf '%s (#%s)' "$(printf '%s' "$PR_JSON" | jq -r '.title')" "$PR_NUMBER")" \
+               > "$RUNNER_TEMP/merge.out" 2>&1; then
+            echo "Merged PR #${PR_NUMBER}."
+            echo "- PR #${PR_NUMBER} self-merged (squash, pinned to ${PR_HEAD})" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::PR #${PR_NUMBER} passed the guard but the merge API refused:"
+            sed 's/^/    /' "$RUNNER_TEMP/merge.out"
+            # The likeliest cause, and one the token itself cannot reveal: the App
+            # installation is repository_selection=selected, so a repo outside that
+            # selection gets a token that cannot act on it.
+            if grep -qiE '403|not accessible|permission|resource not accessible' "$RUNNER_TEMP/merge.out"; then
+              echo "::error::The ips-workflow-agent App cannot merge on ${REPO}."
+              echo "::error::Its installation is repository_selection=selected -- confirm ${REPO}"
+              echo "::error::is in the selected list, with Contents and Pull requests: Read and write."
+            fi
+          fi
