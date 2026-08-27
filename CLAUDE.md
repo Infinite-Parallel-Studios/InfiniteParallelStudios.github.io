@@ -1,29 +1,42 @@
 # InfiniteParallelStudios.github.io
 
 <!-- ips-baseline:start — managed by infinite-forge/baseline. Edit there, not here. -->
-## NEVER merge pull requests
+## Merging pull requests
 
-**Joshua is the merge gate. Open the PR, then stop.**
+**You may merge your own PR once every required check is green. Everything still goes through a
+PR.**
 
-This is a hard rule with no exceptions for convenience, urgency, or "the change is tiny":
+- **You may merge a PR you opened**, once all required checks have passed — not before, and not
+  while one is still running.
+- **You may enable auto-merge** on a PR you opened.
+- **Never push directly to `main`.** Work goes on a branch and reaches `main` only through a PR.
+- **Never merge a PR that touches `.github/workflows/**`, `baseline/**`, or
+  `.github/scripts/**`.** Those are the pipeline itself — the thing that would be doing the
+  merging. A pipeline change that merges itself has no reviewer. Open it, say what it does, and
+  leave it for Joshua.
+- **Never merge a PR that is not yours.** Yours means one this run opened.
 
-- **Never merge a PR.** Not with `gh pr merge`, not through the API, not by pushing the
-  branch's commits onto `main` yourself.
-- **Never enable auto-merge**, and never set a PR to merge when checks pass.
-- **Never push directly to `main`.** Work goes on a branch and reaches `main` only through a
-  PR that Joshua merges.
-- **This applies to test and verification runs too.** If confirming something genuinely
-  requires a merge — verifying that a merged PR moves its board card to Done, say — **ask
-  first and wait for an answer.** A task saying "verify X on merge" describes what to check,
-  not permission to merge.
+This is enforced rather than only asked for: `claude.yml`'s `self-merge` job refuses on both
+counts — by path class, and on any check that is pending, failed, or absent. **Zero check-runs
+is a refusal too**, because "nothing failed" and "nothing ran" look identical from the outside
+(infinite-forge#129). A check reporting `skipped` refuses as well, unless it is one of the named
+few allowed to — today only `mark-not-ready` — so a check that skipped *because something went
+wrong* can never read as approval. The merge is pinned to the exact commit the checks were read from, so
+anything landing on the branch in between is rejected rather than merged unchecked.
 
-A merge is effectively irreversible and it ships code. Being asked to build something is not
-the same as being cleared to release it. When in doubt, open the PR, say exactly what you
-would have merged and why, and let Joshua decide.
+**Enforcement is partial, and you should know which side of it you are on.** As of 2026-08-19 an
+org ruleset is **Active on `infinite-media` only**, where `verify` is a required status check and
+a failing `verify` genuinely blocks the merge. **Every other repo has no ruleset and no branch
+protection on `main`** — a token with `contents: write` can push straight to it.
 
-Everything up to the merge is yours: branch, commit, push the branch, open the PR, write a
-description that says what changed and how you verified it, and label the issue. The final
-click is not.
+So in eight of nine repos the `self-merge` guard, not the platform, is what holds. Do not route
+around it, and do not read a green check on a pipeline change as permission — the guard refuses
+those by path regardless of how green they are. See infinite-cortex#342 for the rollout and
+infinite-cortex#327 for what remains.
+
+Everything up to and including the merge is yours for ordinary work: branch, commit, push, open
+the PR, write a description saying what changed and how you verified it, label the issue, and
+land it when the checks are green. The pipeline is not ordinary work.
 
 ## Before you build
 
@@ -115,6 +128,62 @@ Rules:
   guesses an outcome on your behalf — a stalled run is supposed to look stalled.
 - `needs-context` and `blocked` are different. A question for Joshua is `needs-context`. Waiting
   on other work is `blocked`.
+
+## Accounting for the checklist: the `BOARD_ITEM` marker
+
+`BOARD_STATUS` says how the run ended. `BOARD_ITEM` says what happened to each thing the
+ticket asked for. They are different questions, and the second one is the one that caught
+infinite-cortex#356 — a pull request that merged and closed a ticket it covered one eighth
+of, because the report was prose and nothing compared what was asked for against what was
+done.
+
+**If the ticket body has checkbox items, the final comment must carry one line per item:**
+
+```
+- BOARD_ITEM: 1 | addressed | the extractor now reads the folded scalar (permissions-surface.sh:61)
+- BOARD_ITEM: 2 | not-addressed | needs the token widened first; out of scope for this PR
+- BOARD_ITEM: 3 | cannot-address | the API this asks for was removed in v4; see the comment below
+```
+
+`BOARD_ITEM: <n> | <verdict> | <evidence>`
+
+- **`<n>`** is the item's position in the ticket body, counting **every** `- [ ]` or `- [x]`
+  line in order, under any heading. Not just the ones under `## Acceptance`.
+- **`<verdict>`** is exactly one of:
+
+| Verdict | Use it when |
+|---|---|
+| `addressed` | this run did the thing the item asks for |
+| `not-addressed` | this run did not do it — say why in the evidence field |
+| `cannot-address` | it cannot be done as written; the item is wrong, obsolete, or contradicts something |
+
+- **`<evidence>`** is one line a human can check. A file and line, a test name, or the reason.
+
+Rules:
+
+- **Every item, exactly once.** A missing item, a repeated item, or a verdict for an item the
+  ticket does not have is a refusal — not a smaller pass.
+- **`not-addressed` is an honest outcome, not a failure.** A run that gives an honest verdict
+  for every item has accounted for the ticket, *even if that verdict is `not-addressed` on all
+  of them*. Accounting is a claim about the report, not about how much got built. Deciding
+  whether the amount of work is acceptable is a human's job, and it needs the list to be
+  complete and true before it can be done at all.
+- **Do not invent a verdict to look finished.** Saying `addressed` for something you did not do
+  is worse than saying `not-addressed`, because it is the one thing here nobody can check
+  cheaply.
+- **Only these three words.** Anything else — `done`, `partial`, `already-satisfied` — is
+  refused as unrecognised, deliberately: a vocabulary that grows on demand stops meaning
+  anything.
+- **A leading `-` or `*` is fine**, with or without a space, and indented is fine too. Write the
+  list the way it reads best; the parser accepts both forms.
+- **Markers inside a fenced code block are ignored**, bulleted or not, so quoting this section
+  back, or showing an example, does not report anything.
+- **A ticket with no checkbox items needs none of this.** There is nothing to account for, and
+  the run is not held for the absence.
+
+Until the org variable `SCOPE_ACCOUNTING_ENFORCE` is set to `true`, an unaccounted run is
+reported beside a card that still moves. When it is set, the card is held at In Progress
+instead of reaching Ready for Review.
 
 ## Task dependencies: `Blocked by #N`
 
