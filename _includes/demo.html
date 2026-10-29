@@ -1,0 +1,28 @@
+{%- comment -%}
+  Demo space for a project.
+  Usage: {% include demo.html video="https://www.youtube.com/embed/ID" caption="..." %}
+  `video` may be an embeddable URL (iframe) or a path to an .mp4 under assets/.
+  With no video, the space shows a placeholder in local builds only, so the live
+  site never shows an empty box.
+{%- endcomment -%}
+{%- if include.video and include.video != "" -%}
+<figure class="demo">
+  {%- if include.video contains ".mp4" -%}
+  <video controls preload="metadata" style="width:100%;border-radius:.5rem;">
+    <source src="{{ include.video | relative_url }}" type="video/mp4">
+  </video>
+  {%- else -%}
+  <div style="position:relative;padding-top:56.25%;">
+    <iframe src="{{ include.video }}" title="{{ include.caption | default: 'Project demo' }}"
+      style="position:absolute;inset:0;width:100%;height:100%;border:0;border-radius:.5rem;"
+      allow="accelerometer; encrypted-media; gyroscope; picture-in-picture; fullscreen" loading="lazy"></iframe>
+  </div>
+  {%- endif -%}
+  {%- if include.caption -%}<figcaption>{{ include.caption }}</figcaption>{%- endif -%}
+</figure>
+{%- elsif jekyll.environment != "production" -%}
+<div class="demo demo-placeholder" style="border:2px dashed var(--btn-border-color, #888);border-radius:.5rem;padding:2rem;text-align:center;">
+  <strong>Demo space</strong><br>
+  <small>Set <code>video</code> on this include to show the walkthrough. Hidden on the live site until then.</small>
+</div>
+{%- endif -%}

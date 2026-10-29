@@ -1,0 +1,37 @@
+{%- assign endpoint = site.portfolio.contact_form_endpoint -%}
+{%- if endpoint and endpoint != "" -%}
+<form action="{{ endpoint }}" method="POST" class="contact-form">
+  <div class="mb-3">
+    <label for="cf-name" class="form-label">Name</label>
+    <input id="cf-name" name="name" type="text" class="form-control" autocomplete="name" required>
+  </div>
+  <div class="mb-3">
+    <label for="cf-email" class="form-label">Email</label>
+    <input id="cf-email" name="email" type="email" class="form-control" autocomplete="email" required>
+  </div>
+  <div class="mb-3">
+    <label for="cf-company" class="form-label">Company <small class="text-muted">(optional)</small></label>
+    <input id="cf-company" name="company" type="text" class="form-control" autocomplete="organization">
+  </div>
+  <div class="mb-3">
+    <label for="cf-reason" class="form-label">What's this about?</label>
+    <select id="cf-reason" name="reason" class="form-select">
+      <option>A role I'm hiring for</option>
+      <option>A project or consulting engagement</option>
+      <option>Something else</option>
+    </select>
+  </div>
+  <div class="mb-3">
+    <label for="cf-message" class="form-label">Message</label>
+    <textarea id="cf-message" name="message" rows="6" class="form-control" required></textarea>
+  </div>
+  <input type="text" name="_gotcha" tabindex="-1" autocomplete="off" aria-hidden="true" style="display:none">
+  <input type="hidden" name="_subject" value="Portfolio contact">
+  <button type="submit" class="btn btn-primary">Send message</button>
+</form>
+{%- elsif jekyll.environment != "production" -%}
+<div style="border:2px dashed var(--btn-border-color, #888);border-radius:.5rem;padding:2rem;text-align:center;">
+  <strong>Contact form</strong><br>
+  <small>Set <code>portfolio.contact_form_endpoint</code> in _config.yml to turn the form on.</small>
+</div>
+{%- endif -%}
