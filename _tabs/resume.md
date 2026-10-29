@@ -80,11 +80,9 @@ Additional roles include: Senior Cloud Solutions Architect (TriFin Labs), Senior
 ## Certifications
 
 - CISSP – ISC2
-- AWS Certified Cloud Practitioner
 - Microsoft Certified: Azure Solutions Architect Expert
 - Google Cloud Professional Cloud Architect
 - HashiCorp Certified: Terraform Associate
-- Certified Kubernetes Administrator (CKA)
 - CompTIA Security+, Network+, A+
 - Public Trust Clearance
 
