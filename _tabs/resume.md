@@ -77,7 +77,7 @@ Additional roles include: Senior Cloud Solutions Architect (TriFin Labs), Senior
 
 [Read the Cortex case study]({% post_url 2026-10-29-infinite-cortex %})
 
-## Past certifications
+## Past certifications and clearance
 
 - CISSP – ISC2
 - AWS Certified Solutions Architect – Professional
@@ -85,10 +85,7 @@ Additional roles include: Senior Cloud Solutions Architect (TriFin Labs), Senior
 - Google Cloud Professional Cloud Architect
 - HashiCorp Certified: Terraform Associate
 - CompTIA Security+, Network+, A+
-
-## Clearance
-
-- Public Trust Clearance
+- Public Trust clearance (previously held)
 
 ## Education
 
