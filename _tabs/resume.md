@@ -85,6 +85,7 @@ Additional roles include: Senior Cloud Solutions Architect (TriFin Labs), Senior
 - Google Cloud Professional Cloud Architect
 - HashiCorp Certified: Terraform Associate
 - CompTIA Security+, Network+, A+
+
 ## Clearance
 
 - Public Trust Clearance
