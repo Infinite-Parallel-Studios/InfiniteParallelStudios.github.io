@@ -14,19 +14,19 @@ timezone:
 # jekyll-seo-tag settings › https://github.com/jekyll/jekyll-seo-tag/blob/master/docs/usage.md
 # ↓ --------------------------
 
-title: Infinite Parallel Studios # the main title
+title: Joshua Bray # the main title
 
-tagline: One stop shop for everything Tech and AI related. # it will display as the subtitle
+tagline: Forward Deployed AI Engineer and Cloud Solutions Architect # it will display as the subtitle
 
 description: >- # used by seo meta and the atom feed
-  Best place to find acurate reviews on todays tech. Everything is an affiliate marketing link please use these as this helps me continue to review products and make these recommendations.
+  Portfolio of Joshua Bray, a forward deployed AI engineer and cloud solutions architect who designs and builds agentic AI delivery systems with Claude Code and Codex.
 
 # Fill in the protocol & hostname for your site.
 # E.g. 'https://username.github.io', note that it does not end with a '/'.
 url: "https://infiniteparallelstudios.com"
 
 github:
-  username: infiniteparallelstudios # change to your GitHub username
+  username: Infinite-Parallel-Studios # change to your GitHub username
 
 twitter:
   username: twitter_username # change to your Twitter username
@@ -39,7 +39,7 @@ social:
   links:
     # The first element serves as the copyright owner's link
     # https://twitter.com/username # change to your Twitter homepage
-    - https://github.com/infiniteparallelstudios # change to your GitHub homepage
+    - https://github.com/Infinite-Parallel-Studios # change to your GitHub homepage
     # Uncomment below to add more social links
     # - https://www.facebook.com/username
     # - https://www.linkedin.com/in/username
@@ -211,6 +211,8 @@ exclude:
   - docs
   - tools
   - README.md
+  - CLAUDE.md
+  - vendor
   - LICENSE
   - purgecss.js
   - rollup.config.js
@@ -224,3 +226,10 @@ jekyll-archives:
   permalinks:
     tag: /tags/:name/
     category: /categories/:name/
+
+# Portfolio settings
+portfolio:
+  # Formspree (or other) endpoint the contact form posts to. Empty hides the form on the live site.
+  contact_form_endpoint: ""
+  # Path to the resume PDF under assets/. Empty hides the download button.
+  resume_pdf: ""
