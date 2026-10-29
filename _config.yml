@@ -233,3 +233,7 @@ portfolio:
   contact_form_endpoint: ""
   # Path to the resume PDF under assets/. Empty hides the download button.
   resume_pdf: ""
+  # Scheduling page (Google Calendar appointment schedule, Cal.com or Calendly). Empty hides it.
+  booking_url: ""
+  # true embeds the scheduling page inline under the button.
+  booking_embed: true
